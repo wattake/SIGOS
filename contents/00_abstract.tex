@@ -1,0 +1,47 @@
+\begin{abstract}
+Reboot-based Recovery は，ソフトウェアの再起動によって，
+コンピュータシステムをフェイラや不安定な状態からリカバリするためのシンプルかつ強力な方法である．
+\rr は，\emph{Unikernel} と呼ばれる新しいタイプのオペレーティングシステムへの適用という課題に直面している．
+Unikernel は，OS の機能がライブラリのようにアプリケーションにリンクするライブラリ OS である．
+アプリケーションと Unikernel が密接に結びつくために，Unikernel のみの再起動にアプリケーションの再起動を伴うことになり，
+Unikernel に関係のないメモリの内容を消去し，再構築してしまう．
+本論文では，Unikernel のみの \rr を効率的に行う \emph{VampOS} を紹介する．
+VampOS は，Unikernel コンポーネント間のインタラクションを記録し，
+再起動したコンポーネントにそれらを再実行させることで，
+リンクされたアプリケーションの実行状態を維持したまま，
+Unikernel のコンポーネント単位での Reboot-based Recovery を行う．
+Reboot-based Recovery の前段階であるソフトウェア若化を
+行う最適化されていない VampOS のプロトタイプを Unikraft 0.8.0 に実装した．
+プロトタイプを用いた実験により，
+実行時のオーバヘッドは最大で 13.6 倍であることと，
+意図的に挿入したメモリリークのバグの影響を僅かなダウンタイムで緩和することを示した．
+また，本論文では，Unikernel の効率的な Reboot-based Recovery の実現のための
+次の方向性について述べる．
+
+\end{abstract}
+
+\begin{jkeyword}
+    Reboot-based Recovery, ソフトウェア若化，Unikernels
+\end{jkeyword}
+
+% Software rejuvenation is a simple but powerful
+% method for improving the availability of computer systems.
+% Software rejuvenation faces a challenge to apply itself to a new
+% type of application, the Unikernel which is a library OS where
+% OS functions are linked to the target applications like libraries.
+% Since the unikernel layer is tightly coupled to applications,
+% rebooting the unikernel layers involves the applications’ reboots,
+% eliminating and reconstructing memory contents unrelated to the
+% unikernels. This paper presents VampOS that allows us to rejuve-
+% nate the only unikernel layer. VampOS performs component-level
+% rejuvenation of the unikernel by logging interactions between
+% the components and replaying them to restarted components
+% while simultaneously keeping the linked applications running.
+% We implemented a prototype of VampOS, not well-optimized, on
+% Unikraft 0.8.0 and the experimental results show that its runtime
+% overhead is up to 13.6× and the VampOS-linked SQLite mitigates
+% the effects of the intentionally injected memory leak bugs without
+% any downtime. This paper also describes the next directions for
+% efﬁcient rejuvenation of the unikernel-linked applications.
+
+
