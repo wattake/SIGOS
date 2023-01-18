@@ -1,0 +1,99 @@
+%%
+%% 研究報告用スイッチ
+%% [techrep]
+%%
+%% 欧文表記無しのスイッチ(etitle,eabstractは任意)
+%% [noauthor]
+%%
+
+%\documentclass[submit,techrep]{ipsj}
+\documentclass[submit,techrep,noauthor]{ipsj}
+\usepackage[dvips,dvipdfmx]{graphicx}
+\usepackage{latexsym}
+\usepackage{comment}
+\usepackage{here}
+\usepackage{cite}
+\usepackage{url}
+% added by iguchi_t below.
+\usepackage{listings}
+\usepackage{multirow} % multirow 環境を使おうとすると何故か citation がうまく表示されなくなる
+
+% 囲み枠
+\usepackage{ascmac,fancybox,txfonts}
+\usepackage{caption}
+
+% float 環境関連（図表）
+\usepackage{float}
+\usepackage{longtable,booktabs}
+\usepackage{tabularx}
+
+\lstset{%
+    numbers=left,
+    breaklines=true,
+    frame=shadowbox,
+    basicstyle={\ttfamily\small},
+    numberstyle={\scriptsize},
+    lineskip=-0.5ex
+}
+
+% end here.
+
+\def\Underline{\setbox0\hbox\bgroup\let\\\endUnderline}
+\def\endUnderline{\vphantom{y}\egroup\smash{\underline{\box0}}\\}
+\def\|{\verb|}
+%
+
+%\setcounter{巻数}{59}%vol59=2018
+%\setcounter{号数}{10}
+%\setcounter{page}{1}
+
+\renewcommand{\lstlistingname}{コード}
+
+\def\sysname{VampOS}
+\def\Sysname{VampOS}
+
+\def\rr{Reboot-based Recovery}
+
+% \def\rh{per-object recovery handler}
+% \def\Rh{Per-object recovery handler}
+
+% \def\rhs{per-object recovery handlers}
+% \def\Rhs{Per-object recovery handlers}
+
+% \def\mlist{M-list}
+% \def\Mlist{M-List}
+
+% \def\nmiq{NMI shepherd}
+% \def\Nmiq{NMI shepherd}
+
+% \def\ptdup{PTDUP}
+% \def\Ptdup{PTDUP}
+
+\begin{document}
+
+\title{Reboot-based Recovery を指向する Unikernel}
+%\etitle{A Recovery Mechanism for the Kernel-level ECC-uncorrectable Error}
+
+\affiliate{tuat}{東京農工大学\\
+Tokyo University of Agriculture and Technology}
+
+\author{和田 健}{Takeru Wada}{tuat}
+\author{山田 浩史}{Hiroshi Yamada}{tuat}
+
+\input{contents/00_abstract.tex}
+
+\maketitle
+
+\input{contents/01_introduction.tex}
+% \input{contents/02_background.tex}
+% \input{contents/03_proposal.tex}
+% \input{contents/04_design.tex}
+% \input{contents/05_evaluation.tex}
+% \input{contents/06_discussion.tex}
+% \input{contents/07_conclusion.tex}
+
+\bibliographystyle{ipsjunsrt}
+\bibliography{yamada,references}
+
+\end{document}
+

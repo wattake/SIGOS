@@ -1,0 +1,94 @@
+\section{はじめに} \label{section:introduction}
+
+\rr は，ソフトウェアをフェイラや不安定な状態からリカバリするためのシンプルかつ強力な方法であり，
+アプリケーションを再起動することで，その実行状態をリフレッシュする．
+定期的なアプリケーションの再起動は，\emph{ソフトウェア若化}と呼ばれ，
+解放忘れのメモリオブジェクトや閉じ忘れたディスクリプタなどの古くなったり漏れたりしているリソースを回収することで，
+アプリケーションのクラッシュを未然に防ぐことができる．
+ソフトウェア若化は，フェイラの根本的な原因を解析することなしにフェイラからリカバリすることができるうえ，
+アプリケーションの修正をせずに適用できるため，
+エンドユーザにとってのソフトウェアのエラーや不具合への唯一の対策となることがしばしばある．
+また，\rr は，クラッシュやハングアップからアプリケーションをリカバリするためにも使われる．
+その有用性から \rr の適用範囲を拡大するために，
+研究者たちは Java アプリケーション~\cite{CandeaEtAl-Microreboot}やインメモリデータベース~\cite{JumonjiEtAl-WoSAR17,JumonjiEtAl-IEICE2021}，
+オペレーティングシステム~\cite{YamakitaEtAl-PBR,DepoutovitchEtAl-otherworld,KouraiEtAl-cachemind,TeradaEtAl-Dwarf,BovenziEtAl-ISSRE13}，
+ハイパーバイザ~\cite{KouraiEtAl-Roothammer,KouraiEtAl-TDSC,LeEtAl-VEE11}などの様々なソフトウェアレイヤに対して有効なソフトウェアメカニズムを提案している.
+
+\rr は，\emph{Unikernel} と呼ばれる新しいタイプのオペレーティングシステムへの適用にするという課題に直面している，
+Unikernel ~\cite{MadhavapeddyEtAl-Unikernel,KivityEtAl-OSv,SartakovEtAl-ASPLOS21,KanteeEtAl-rumprun,KuenzerEtAl-Unikraft}は，
+OS の機能がライブラリのようにアプリケーションにリンクするライブラリ OS であり，
+特にクラウド環境において利点となるいくつかのメリットを提供する．
+第一に，Unikernel は，アプリケーションと同じ保護モードで動作するため，
+システムコールを実行時にモード切り替えが発生せず，
+システムコールオーバヘッドの問題が軽減される．
+第二に，
+すべての機能を内包する
+汎用的に使われるモノリシック OS カーネルとは異なり，
+Unikernel では，
+アプリケーションの実行に必要な OS コンポーネントのみをリンクするため，
+Unikernel にリンクされたアプリケーションのメモリフットプリントが小さい．
+第三に，
+不必要な OS コンポーネントを排除することで，
+Unikernel にリンクされたアプリケーションのトラステッドコンピューティングベース(TCB)を小さく保ち，
+攻撃の標的となるものを減らすことができる．
+
+Unikernel の主要なタスクは，ハイパーバイザ上でリンクされたアプリケーションの実行を制御することであるため，
+できるだけ信頼性を高いものにしたほうが良く，Unikernel レイヤのみの
+\rr は有用である．
+例えば，
+Unikernel が経年劣化に関するバグによって停止したときに，
+アプリケーションは正常に動作しなくなる．
+しかし，Unikernel レイヤのみの \rr を効率的に行うことは困難である．
+Unikernel レイヤとアプリケーションの結びつきが強いため，
+アプリケーションの再起動を伴うことになり，
+Unikernel に関係のないメモリの内容を消去し，再構築してしまう．
+実行中のアプリケーションの再起動を伴わない OS カーネルのみを若返らせるソフトウェアメカニズム~\cite{DepoutovitchEtAl-otherworld,TeradaEtAl-Dwarf}が提案されているものの，
+それらの設計はモノリシック OS カーネルが対象であり，
+アプリケーションの実行ごとに OS コンポーネントが異なる Unikernel には適さない．
+
+本論文では，
+効率的に Unikernel レイヤのみの \rr を実現する \emph{\sysname} を紹介する．
+VampOS は，
+リンクされたアプリケーションの実行状態を維持したまま，
+Unikernel のコンポーネント単位での Reboot-based Recovery を行う．
+VampOS は，Unikernel のカスタマイズ性を利用することである．
+Unikernel のコンポーネントは互いに高度に独立し，
+コンポーネント間のインタフェースは明確に定義されている．
+\sysname は，対象のコンポーネントを再起動し，
+再起動したコンポーネントに
+コンポーネント間のインタラクションを記録したもの
+を再実行させることで，
+コンポーネントの実行状態をリフレッシュしたメモリの内容とともに復元する．
+
+Reboot-based Recovery の前段階であるソフトウェア若化を
+行う VampOS のプロトタイプ Unikraft 0.8.0 に実装し，
+VampOS の有効性を示す予備実験を行った．
+実験の結果は，その実行時のオーバヘッドは最大で 13.60 倍であるものの，
+VampOS にリンクされたリレーショナルデータベースである SQLite に
+意図的に挿入したメモリリークのバグの影響を僅かなダウンタイムで緩和することを確認した．
+本研究は，Unikernel の効率的な \rr を実現するための最初の段階であり，
+プロトタイプは十分に最適化されていない．
+しかし，Unikernel にリンクされたアプリケーションの効率的な \rr のための次の方向性を明確に捉えることができた．
+
+本論文の構成は次のとおりである．
+第 2 章では本研究の背景について述べ，
+第 3 章では VampOS の全体像を示す．
+第 4 章では，VampOS のプロトタイプを用いた予備実験とその結果について述べる．
+第 5 章では，本研究の現状と次の方向性について述べる．
+
+% % rejuvenation
+% Software rejuvenation~\cite{HuangEtAl-rejuvenation,CotroneoEtAl-rejuvenation-survey,CotroneoEtAl-Surv14} is a simple but powerful method for improving the availability of computer systems. Software rejuvenation refreshes the running states of an application by restarting it. Periodically performing software rejuvenation reclaims stale or leaked resources as memory leaks and descriptor leaks, a.k.a. \emph{software aging}, resulting in preventing application crashes. Software rejuvenation allows us to recover from failures without analyzing their root causes. In addition, this method is applicable to ``as-is'' applications and thus often becomes the only remedy against software errors and failures for end users. To extend the applicability of software rejuvenation due to its usefulness, researchers have proposed effective software mechanisms for various software layers such as java applications~\cite{CandeaEtAl-Microreboot}, in-memory databases~\cite{JumonjiEtAl-WoSAR17,JumonjiEtAl-IEICE2021}, operating systems (OSes)~\cite{YamakitaEtAl-PBR,DepoutovitchEtAl-otherworld,KouraiEtAl-cachemind,TeradaEtAl-Dwarf,BovenziEtAl-ISSRE13}, and hypervisors~\cite{KouraiEtAl-Roothammer,KouraiEtAl-TDSC,LeEtAl-VEE11}.
+
+% % unikernel
+% Software rejuvenation faces a challenge in applying itself to a new type of applications, \emph{Unikernels}. The unikernel~\cite{MadhavapeddyEtAl-Unikernel,KivityEtAl-OSv,SartakovEtAl-ASPLOS21,KanteeEtAl-rumprun,KuenzerEtAl-Unikraft} is a library OS where OS functions are linked to the target applications like libraries. It offers several benefits that are advantages, especially in cloud environments. First, the overhead of system call issues is mitigated since the unikernel runs on the same protection mode as the applications, and thus the system calls do not cause mode changes. Second, the memory footprint of the unikernel-linked applications is small since the applications can link only OS components required for their execution, different from widely-used monolithic OS kernels that contain full OS functionalities. Third, we can keep the trusted computing base (TCB) of the unikernel-linked applications small by removing unnecessary OS components, thus reducing attack surfaces.
+
+% % what's challenge
+% Rejuvenating the unikernel layer is helpful since it is better to make the unikernel layer as reliable as possible due to its primary task of controlling linked application execution on top of the hypervisor. For example, the applications cannot run correctly when unikernels are down by aging-related bugs. However, efficient rejuvenation of unikernels does not come for free. Since the unikernel layer is tightly coupled to applications, rebooting the unikernel layers involves the applications' reboots, eliminating and reconstructing memory contents unrelated to the unikernels. Although software mechanisms~\cite{DepoutovitchEtAl-otherworld,TeradaEtAl-Dwarf} for rejuvenating the OS kernels without restarting the running applications have been proposed, the implicit assumption of their designs is that the target OS kernels are monolithic; they are not suitable for unikernels whose runtime components are different among applications.
+
+% This paper presents \emph{\sysname}, which achieves efficient software rejuvenation of the unikernel layer. {\sysname} allows us to perform component-level rejuvenation of the unikernel while simultaneously keeping the linked applications running. The key behind {\sysname} is to exploit unikernels' customizability; the components are highly independent of each other and interfaces between each component are well defined. {\sysname} restarts the target components and restores the running states with flesh memory contents by logging interactions between them and replaying them to the restarted components.
+
+% We prototyped {\sysname} on Unikraft {\version} and conducted some preliminary experiments to show the effectiveness of {\sysname}. The experimental results show that its runtime overhead is up to 13.60{\texttimes} and the {\sysname}-linked SQLite, which is a widely-used relational database, mitigates the effects of the intentionally injected memory leak bugs without any downtime. This work is the first-step to making unikernels rejuvenatable, and the prototype has not been well-optimized yet. Through this work, we clearly capture the next directions for efficient rejuvenation of the unikernel-linked applications. 
+
+% The rest of the paper is organized as follows. Sec.~\ref{sec:bg} introduces the background of this work and Sec.~\ref{sec:prop} shows an overview of {\sysname}. Sec.~\ref{sec:design} describes the design details of {\sysname} and Sec.~\ref{sec:exp} conducts preliminary experiments with a prototype of {\sysname} and their results. Sec.~\ref{sec:next} finally mentions the current status of the work and the next directions. 
+
+
