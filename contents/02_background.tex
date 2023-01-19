@@ -1,0 +1,274 @@
+\section{背景} \label{sec:background}
+
+
+\subsection{Unikernels}
+
+Unikernel は，対象のアプリケーションにリンクし，
+アプリケーションと同じ保護モードからのハイパーコールを介して，
+下層のハイパーバイザに計算資源を要求する．
+Unikernel はリンクされたアプリケーションとアドレス空間を共有するため，
+一般的な Unikernel は，マルチプロセスアプリケーションではなく，
+シングルプロセスで動作するアプリケーションのみをサポートする．
+Unikernel は，特にクラウド環境で受け入れられている．
+クラウド環境上の個々の仮想マシン (VM) は通常，
+1 つのアプリケーションのみを実行するため，
+OS の機能の一部のみを使用するためである．
+研究者たちは，セキュリティアーキテクチャ~\cite{MadhavapeddyEtAl-Unikernel}や
+様々なアプリケーションへのサポート~\cite{KivityEtAl-OSv,ZhangEtAl-Kylinx,WilliamsEtAl-SoCC18,OlivierEtAl-VEE19}，
+組み込みクラウド用のマルチテナントコントローラ~\cite{MadhavepeddyEtAl-Jitsu}，
+軽量ネットワーク機能の仮想化~\cite{MartinsEtAl-NSDI14}，
+軽量特権仮想マシン~\cite{MehrabEtAl-Kite}，
+モジュラリティの向上~\cite{KuenzerEtAl-Unikraft,KuenzerEtAl-SYSTOR19}，
+コンポーネント間のアイソレーションの強化~\cite{LefeuvreEtAl-FlexOS,SartakovEtAl-ASPLOS21}
+を含む Unikernel の仕組みと適用範囲を研究している．
+
+\begin{figure}[t]
+    \begin{center}
+      \begin{tabular}{c}
+        \includegraphics[scale=0.3]{./img/monolithic.eps} \\
+        (a) Conventional Monolithic OS kernel       \vspace*{2mm} \\ 
+        \includegraphics[scale=0.3]{./img/unikernel.eps} \\
+        (b) Unikernel \\
+      \end{tabular}
+      \caption{\textbf{OS カーネルアーキテクチャの違い} \textit{従来の OS カーネルは，アプリケーションと対話するためのシステムコールを公開し，実行中のアプリケーションに不必要な OS 機能さえもすべて含んでいる．Unikernel はライブラリとして動作し，アプリケーションが動作するのに必要なコンポーネントのみをリンクする．}}
+      \label{fig:kernels}
+    \end{center}
+  \end{figure}
+
+図\ref{fig:kernels}は，従来のモノリシックカーネルと Unikernel の違いを示している．
+Linux のような従来の OS カーネルでは，ファイルシステムやネットワークスタックのようなすべてのサブシステムをその必要性に関係なく含んでおり，
+アプリケーションより高い特権レベルで動作する．
+アプリケーションは計算資源を要求するためにシステムコールを発行し，
+トラップすることによって，下層の OS カーネルに特権操作を行う．
+一方で，Unikernel は対象のアプリケーションに直接リンクし，
+同じアドレス空間で同じ特権モードで動作する．
+アプリケーションは，
+動作に必要な OS コンポーネントのみを選択して，リンクすることができる．
+これらの特徴は，従来の OS カーネルと比較して，
+高速なシステムコール発行やブート時間の短縮，
+メモリフットプリントの縮小，OS カーネルレイヤのコードサイズの縮小を含む
+いくつかの利点を提供する．
+
+本論文では，
+\emph{どのように Unikernel の効率的な \rr を実現するのか?}
+という問いについて答えようとするものである．
+Unikernel レイヤの信頼性をできるだけ高いものにしたほうが良い．
+Unikernel はアプリケーションとハイパーバイザの中間に位置し，
+計算資源をハイパーバイザに要求し，
+リンクしたアプリケーションにその計算資源を与えるので，
+Unikernel レイヤに障害が発生すると
+アプリケーションは実行状態を維持することができなくなる．
+OS カーネルは，その複雑性と変化し続ける機能から，
+過去数十年に渡る多くの努力~\cite{ChouEtAl-SOSP01,PalixEtAl-ASPLOS11,Syzkaller,PanEtAl-SEC17,PailoorEtAl-SEC18,SchumiloEtAl-kAFL, TalebiEtAl-SEC21}
+を以ってしてもバグのないソフトウェアからは程遠い．
+そして，Unikernel を定期的に再起動し，
+リフレッシュしたメモリの内容の使用を強制することは，
+クラウドサービスを安定して提供するのに有効である．
+
+しかし，効率的な Unikernel の \rr は容易ではない．
+Unikernel がアプリケーションと密接に結びつくために，
+Unikernel の再起動がアプリケーションの再起動を伴うことになり，
+Unikernel に関係のないメモリの内容を消去し，再構築してしまう．
+これは，
+最近のインメモリデータベースやインメモリ分散フレームワークのようなインメモリアプリケーションにおいて重要なことである．
+メモリフットプリントが数十 GB から数百 GB になり，
+実行状態の復元に時間がかかるためである．
+ある研究では，
+Facebook のサーバを一度に 2 \% だけを再起動すると，
+再起動時間は約 12 時間まで延長され，
+ユーザはクエリの結果の一部しか見ることができないことが報告されている~\cite{GoelEtAl-SIGMOD14}．
+
+\subsection{過去のアプローチ}
+
+対象のソフトウェアを効率的に再起動するための
+ソフトウェアメカニズムはこれまでにも模索されている．
+いくつかの研究では OS カーネルの効率的な再起動に注目している．
+KUP~\cite{KashyapEtAl-KUP}は，OS カーネルが再起動しても，アプリケーションの実行を維持する．
+KUP は，メモリ上の対象のアプリケーションのユーザスペースのチェックポイントメカニズム~\cite{CRIU}を用いたスナップショットを取得し，
+OS の再起動後にスナップショットを復元する．
+このアプローチを Unikernel にリンクされたアプリケーションに適用することができない．
+従来の OS カーネルとは異なり，
+リンクされたアプリケーションと共有する単一のアドレス空間のみをサポートする Unikernel では，
+チェックポイントの取得処理を対象のアプリケーションと同時に実行することができない．
+また，
+アプリケーションと Unikernel の境界が不明確であり，Unikernel のカスタマイズ性によりアプリケーションとは異なるため，
+Unikernel にリンクされたアプリケーション以外が，対象のアプリケーションレイヤのみのスナップショットを取ることは困難である．
+
+
+Otherworld~\cite{DepoutovitchEtAl-otherworld}や Dwarf~\cite{TeradaEtAl-Dwarf}は，
+アプリケーションを動作させながら OS カーネルの再起動をする．
+OS カーネルを再起動する際に，
+Otherworld は新しいカーネルを起動し，
+古い OS カーネルのメモリ上のプロセスコンテキストのカーネルメモリオブジェクトを強制的に回収し，
+その内部構造を新しい OS カーネルに復元する．
+Dwarf は，対象のアプリケーションに対するプロセスコンテキストのコアをハイパーバイザに保存し，
+新しく起動した仮想マシン上に OS カーネルを起動し，
+対象のアプリケーションを古い仮想マシンから新しい仮想マシンへと移行しながら，
+新しいカーネルにアプリケーションの動作状態を強制的に復元させる．
+これらのアプローチの前提として，対象の OS カーネルが\emph{モノリシック}であり，
+Unikernel のコンポーネントがアプリケーションとは異なり，
+プロセスコンテキストを維持するためのカーネルオブジェクトが一定ではないため，
+Unikernel の特性に適したアプローチとはいえない．
+
+
+Microreboot~\cite{CandeaEtAl-Microreboot}は，
+細かい粒度でのソフトウェアの再起動を実現する．
+Microreboot を可能にするために，
+対象のアプリケーションは，
+再起動の単位となる独立した小さいソフトウェアコンポーネントに分割される．
+小さいコンポーネントの再起動が故障から回復できない場合には，
+より大きいコンポーネントが再起動される．
+このアプローチの暗黙の仮定として，
+Microreboot される各コンポーネントは状態を持たないので，
+対象のアプリケーションは，任意のコンポーネントの再起動に渡って，
+一貫して動作し続ける．
+Unikernel のコンポーネントは状態を持つことが多く，
+ファイルシステムやネットワークのような状態を持つコンポーネントの再起動に渡って，
+アプリケーションが一貫して動作し続けることは難しい．
+
+Phase-baseds~\cite{YamakitaEtAl-PBR}や ShadowReboot~\cite{YamadaEtAl-ShadowR}，CacheMind~\cite{KouraiEtAl-cachemind}を含む
+効率的な OS の再起動に対するアプローチは，
+OS カーネルの再起動によって引き起こされるダウンタイムとパフォーマンスの低下を軽減する．
+通常の OS の再起動のように，これらのアプローチはすべての動作中のアプリケーションの再起動を伴い，
+メモリフットプリントが大きなインメモリアプリケーションにおいて深刻なパフォーマンスの低下を引き起こす．
+ハイパーバイザのソフトウェア若化をサポートするアプローチでは，
+ハイパーバイザの再起動渡って，仮想マシンの動作状態を維持する．
+これらのアプローチは，私たちのアプローチと補完関係にある．
+
+いくつかのアプローチは Unikernel の信頼性の向上を目的としている．
+Unikraftt~\cite{KuenzerEtAl-Unikraft}は，
+Unikernel のモジュラリティを高め，
+TCB をできるだけ小さくすることによってカスタマイズ性と信頼性を向上させている．
+CubicleOS~\cite{SartakovEtAl-ASPLOS21}と FlexOS~\cite{LefeuvreEtAl-FlexOS}は，
+故障したコンポーネントから他のコンポーネントへのエラー伝搬を防ぐために
+Unikernel のコンポーネント同士を強く分離するものである．
+これらのアプローチは，
+Unikernel がリンクするアプリケーションの信頼性を維持するために，
+私たちのアプローチとは補完的な立ち位置にある．
+これらのアプローチでは，Unikernel が経年劣化に関連したバグに悩まされることがないことを保証できないため，
+私たちのアプローチでは Unikernel を \rr することでその悪影響を軽減することができる．
+
+
+% A. Unikernels
+% The unikernel is linked to the target applications and
+% requests computational resources to the underlying hypervi-
+% sor via hypercalls from the same protection mode as the
+% applications. The unikernel shares the address space with
+% the linked applications; typical unikernels support single-
+% process applications, not multi-process ones. The unikernel
+% is accepted especially in cloud platforms because each virtual
+% machine on modern cloud platforms typically runs only one
+% application and uses only parts of OS functionalities. Re-
+% searchers have studied unikernel’s architectures and applica-
+% bility including secure architectures [25], supports for various
+% applications [16], [28], [36], [39], multi-tenant controller for
+% embedded clouds [24], lightweight network function virtual-
+% ization [26], lightweight privilege virtual machines [27], im-
+% provements of the modularity [20], [21], and the enhancement
+% of isolation between components [23], [32].
+% Fig. 1 shows the difference between the conventional mono-
+% lithic OS kernels and unikernels. The conventional OS kernels
+% like Linux contain all subsystems such as ﬁle systems, memory
+% managers, and network stacks, regardless of the necessity of
+% the running applications, and run at a higher privilege level
+% than the applications. The applications issue system calls to
+% request computational resources and privilege operations to
+% underlying OS kernels by causing traps. On the other hand,
+% the unikernels are directly linked to the target applications
+% and run on the same address spaces and privilege mode. The
+% applications can choose and link the only kernel components
+% they require to run. These features provide several beneﬁts,
+% including faster system call issues and boot time, smaller
+% memory footprint, and smaller code of the OS kernel layer
+% than conventional OS kernels.
+% In this paper, we try to answer the following question: How
+% do we rejuvenate unikernels efﬁciently? It is better to make
+% the unikernel layer as reliable as possible. Since unikernels are
+% intermediate between applications and hypervisors to request
+% computational resources to the hypervisor and give the re-
+% sources to the linked applications, the applications cannot keep
+% running when their unikernel layers fail. OS kernels are still
+% far from bug-free software even with numerous efforts [2], [6],
+% [29]–[31], [33], [34] in the past decades due to its complex and
+% ever-changing functionalities, and thus, the periodic restarts of
+% unikernels to enforce them to use fresh memory contents are
+% helpful to offer cloud services stably.
+% The efﬁcient rejuvenation of unikernels, however, does not
+% come for free. Since the unikernels are tightly coupled with
+% the applications, the rejuvenation of the unikernels involves
+% restarting the applications, causing the elimination and restora-
+% tion of memory contents unrelated to unikernels. This is non-
+% trivial for modern in-memory applications such as in-memory
+% databases and in-memory distributed frameworks because their
+% memory footprints are tens to hundreds of GB of memory and
+% restoring running states is time-consuming. A research paper
+% reported that restarting only 2% of Facebook’s servers at a
+% time prolongs the restart duration to about 12 hours, during
+% which time users see only partial query results [10].
+% B. Previous Approaches
+% Software mechanisms for efﬁciently rebooting the target
+% software have been explored so far. Some work focuses on ef-
+% ﬁcient OS kernel reboots. KUP [15] keeps the application run-
+% ning across the OS kernel reboots. KUP takes snapshots of the
+% target applications in memory with user-space checkpointing
+% mechanisms [1], and restores them after the OS reboot. This
+% approach is not applicable to unikernel-linked applications.
+% Unlike conventional OS kernels, the checkpointing process
+% cannot run with the target application on a unikernel that
+% supports only a single address space shared with the linked
+% application. Also, taking snapshots of the only application
+% layers is difﬁcult outside unikernel-linked applications because
+% the boundary between applications and unikernels is unclear
+% and different from the applications due to the customizability
+% of the unikernel.
+% Otherworld [9] and Dwarf [35] restart the OS kernels,
+% keeping applications running. In restarting the OS kernel,
+% Otherworld launches the newer kernel and forces it to salvage
+% kernel memory objects of the process contexts in the older
+% kernel’s memory and restore its internal structures. Dwarf
+% stores the cores of process contexts for the target applications
+% to the hypervisor, launches the OS kernel on a newly-launched
+% virtual machine, and forces the kernel to restore them while
+% migrating the target applications from the old virtual machine
+% to the newly-launched one. The assumption behind these
+% approaches is that the target OS kernels are monolithic, and
+% the approaches are not suitable for the characteristics of the
+% unikernels; since the unikernel’s components are different
+% between applications, the kernel objects to maintain process
+% contexts are not constant. The redesign of these mechanisms
+% for each unikernel-linked application is required and a non-
+% trivial task.
+% Microreboot [5] achieves ﬁne-grained software reboots. To
+% enable a microreboot, the target application is divided into
+% small independent software components which become units
+% for a reboot. If rebooting a small component cannot recover
+% from a failure, a bigger component will be rebooted. The
+% implicit assumption of this approach is that each component
+% to be microrebooted is so stateless that the target applica-
+% tions consistently run across some components’ reboots. The
+% components of the unikernels are often stateful; thus, it is
+% difﬁcult for the linked applications to consistently run across
+% rejuvenating stateful components such as ﬁle systems and
+% networks.
+% Approaches for efﬁcient OS reboots, including Phase-based
+% reboots [38], ShadowReboot [37], and CacheMind [17] reduce
+% downtime and performance degradation incurred by the OS
+% kernel reboots. Like regular OS reboots, these approaches
+% involve all running applications’ restart and thus cause sig-
+% niﬁcant performance degradation for modern in-memory ap-
+% plications whose memory footprints are large. Approaches
+% to support hypervisor rejuvenation [18], [19], [22] allow us
+% to keep running states of the virtual machines across the
+% hypervisor rejuvenation. These approaches are complementary
+% to ours.
+% Some approaches aim at the improvement of the uniker-
+% nel reliability. Unikraft [20] enhances the modularity of the
+% unikernels to improve their customizability and reliability by
+% making their TCB as small as possible. CubicleOS [32] and
+% FlexOS [23] strongly isolate unikernel components from each
+% other to prevent error propagation from faulted components to
+% the other ones. These approaches are complementary to ours to
+% attain the reliability of the unikernel-linked applications. Since
+% these approaches do not guarantee that the unikernels never
+% suffer from aging-related bugs, our approach can mitigate their
+% adverse effects by making the unikernels rejuvenatable.
