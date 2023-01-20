@@ -1,0 +1,1085 @@
+\section{Design Details}
+\label{sec:design}
+% In order to solve technical challenges described in Sec.~\ref{sec:prop}, we introduce three novel mechanisms: A-List, Per-Object Recovery Handlers, and NMI Queuing.
+Fig.~\ref{Recovery_Handling_Overview} illustrates an overview of {\sysname}. The key of {\sysname} is the three software mechanisms: \emph{\rh}, \emph{\alist}, and \emph{\nmiq}. When an ECC-uncorrectable error is detected, {\sysname} receives a non-maskable interrupt (NMI) from the ECC hardware module and invokes our NMI handler. The NMI handler enqueues the physical address of the damaged memory portion to deal with multiple ECC-uncorrectable errors sequentially. And then, the handler identifies the types of the damaged memory objects by tracking the {\alist} that associates the physical addresses with memory object types. Given a damaged memory object, it calls the corresponding recovery handler to reconstruct the internal structures of {\sysname}. We describe these mechanisms in detail below.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width = 8.5cm]{./figures/Recovery_Handling_Overview_Mlist.png}
+  \vspace*{-2.5mm}
+  \caption{Recovery Approach Overview.\label{Recovery_Handling_Overview}}
+  \vspace*{-6.5mm}
+\end{figure}
+
+\subsection{xv6 Overview}
+% At first, we briefly explain the configuration and memory objects of xv6\cite{xv6-public}, which is used as a case study in this study. xv6 is a kind of UNIX like OS which is made by MIT (Massachusetts Institute of Technology). It is a small OS with about ten thousands of codes, and is mainly used as a subject in OS lectures at MIT and other universities. xv6 has very simple structure, such as File System (FS) which employs journaling, memory allocator which employs Free-List and disk I/O through Virtio\cite{Virtio}, and each modules have some memory objects to implement their faculties. Table \ref{tbl:rh_fs}, \ref{tbl:rh_co}, \ref{tbl:rh_lk}, \ref{tbl:rh_ma} show summaries of each modules memory objects specified as recovery target objects and their recovery outlines. Table \ref{OutofRecoveryTargets} summarizes the reasons why other objects are not recovery targets. The semantics of recovery target objects will be explained in the Sec.~\ref{subsec:recoveryhandler}.
+Xv6 mainly consists of five main components: \emph{file system}, \emph{memory manager}, \emph{console}, \emph{locks}, and \emph{process manager}. The file system is a journaling file system that expose common Unix-based system calls such as \textsf{open()/close()} and \textsf{read()/write()}. It consists of 11 memory objects such as \texttt{file} and \texttt{log}. The memory manager controls the allocations and releases of physical memory pages and consists of three memory objects: \texttt{kmem}, \texttt{run} and page tables. The console manages the console I/O and has three memory objects: \texttt{devsw}, \texttt{cons} and \texttt{pr}. The locks are used for mutual exclusions of process contexts and consists of two objects: \texttt{spinlock} and \texttt{sleeplock}. The last one is the process manager that performs the process scheduling and trap handling. It has four memory objects which mainly store metadata for every process or CPU and the contents of saved general registers.
+
+\subsection{Handling Damaged Memory Objects}
+\label{subsec:handling_objects}
+Through manually checking all the xv6's memory objects, it is not easy to prepare a general-purpose recovery handler applicable to every memory object, each of which has its own semantics and unique relationships with other memory objects. To consistently reconstruct the OS kernel internals, {\sysname} invokes \emph{\rhs} that perform surgery of the internal structures based on the type of the target objects. Each object has a recovery handler and {\sysname} invokes the corresponding one when the ECC-uncorrectable error damages a memory object, and the ECC module detects it.
+% Through manually checking all the xv6's memory objects, it is not easy to apply a general-purpose recovery handler to every memory object, each of which has its own semantics and unique relationships with other memory objects. To consistently reconstruct the OS kernel internals, {\sysname} invokes \emph{\rhs} that perform surgery of the internal structures based on the type of the target objects. Each memory object has a recovery handler and {\sysname} invokes the corresponding one when the ECC-uncorrectable error damages a memory object, and the ECC hardware module detects it.
+% Through manually checking all the xv6's memory objects, it is not easy to prepare a general-purpose recovery handler applicable to every memory object, each of which has its own semantics and unique relationships with other memory objects. To consistently reconstruct the OS kernel internals, {\sysname} invokes \emph{\rhs} that perform surgery of the internal structures based on the type of the target memory objects. Each memory object has a recovery handler and {\sysname} invokes the corresponding recovery handler when the ECC-uncorrectable error damages a memory object, and the ECC hardware module detects it.
+
+{\sysname}'s recovery handler for the ECC-uncorrectable error consists of two phases: \emph{internal-surgery} and \emph{after-treatment}. The internal-surgery phase prunes the target memory object and reconstructs deeply-related memory objects to keep the OS kernel internals consistent. For example, in repair \texttt{buf}, we need to update \texttt{log} and \texttt{disk}, both of which have a pointer to the \texttt{buf} object.
+
+Pruning damaged memory objects is intuitive and simple, but the OS kernel crashes and cannot run consistently only by pruning some objects, such as the PCB and its text region. To address this issue, we group memory objects into three categories based on their semantics.
+
+%\textbf{Pruning: } The memory objects in this group are pruned when an ECC-uncorrectable error occurs in them. We group into this category memory objects even without which OS kernels keep running. For example, XXXXX.
+\noindent
+\textbf{Pruning: } The memory objects in this group are pruned when an ECC-uncorrectable error occurs in them. We group into this category memory objects even without which OS kernels keep running. For example, \texttt{run}, which is metadata for the free memory list, is grouped into pruning since even the free list works well even after removing a \texttt{run} object from it.
+
+%\textbf{Initializing: } When the memory objects in this group are corrupted, the recovery handler allocates new objects and initializes them. The memory objects that are necessary but the contents do not matter to keep running the OS kernel are classified into this group. For example, XXXXX.
+\noindent
+\textbf{Initializing: } When the memory objects in this group are corrupted, the recovery handler allocates new objects and initializes them. The memory objects that are necessary but the contents do not matter to keep running the OS kernel are classified into this group. For example, \texttt{buf} that caches disk blocks is initialized since its contents that can be restored from the disk, is soft-state.
+
+%\textbf{Restoring: } We repair the damaged memory objects when the OS kernel cannot continue to run anymore without them. The recovery handlers restore the corresponding objects by reading other memory objects and preparing the memory objects for restoration such as the replica and metadata. For example, XXXXX.
+\noindent
+\textbf{Restoring: } We repair the damaged memory objects when the OS kernel cannot continue to run anymore without them. The recovery handlers restore the corresponding objects by reading other memory objects and preparing the memory objects for restoration such as the replica and metadata. For example, the page table needs to be restored since the process cannot access the regal memory regions.
+
+%% Each recovery handler that recovers damaged memory objects due to ECC-uncorrectable errors corresponds to a different type of memory object and has a different recovery operation. As mentioned in Sec.~\ref{sec:motiv}, one general recovery handler cannot handle all types of memory objects because they have completely different roles and relationships between other objects. Thus, per-object recovery handlers which are adjusted to each memory object are needed, not a general recovery handler. To recover broken objects, recovery handlers follow three steps: \emph{Reconstruct}, \emph{Solve Inconsistencies} and \emph{Determine Termination}.To reconstruct the internal structures of the OS kernel damaged by ECC-uncorrectable errors, we
+% Each recovery handler that recovers damaged memory objects due to ECC-uncorrectable errors corresponds to a different type of memory object and has a different recovery operation. To recover damaged objects correctly, recovery handlers follow two steps: \emph{Surgery of Internal Structures} and \emph{Exposure of the Error}.
+
+In the after-treatment phase, {\sysname} performs a procedure to finish the recovery handler. To keep the OS kernel running, we transmit control from the recovery handler to the OS kernel core after the internal-surgery phase completes.
+% An access to a damaged memory object in a process kernel context triggers an NMI and jumps from the context to the recovery handler. 
+Since a process kernel context is suspended at the access to the damaged memory object, an NMI occurs again if the context is restored after the recovery handler, similar to other interrupt handlers. We appropriately deal with the kernel context accessing the corrupted memory object. {\sysname} has the following three types of procedures for the after-treatment phase.
+
+\noindent
+\textbf{Syscall fail: } The recovery handler returns to the process as a system call error. After the internal-surgery phase, the recovery handler terminates the kernel process context and returns to its user context with a system call error. For example, {\sysname} returns a system call error on reading console input via the damaged \texttt{devsw} since the restoration of the kernel context causes an NMI again due to the access to the damaged one.
+% \textbf{Syscall fail: } The recovery handler returns to the process as a system call error. After the internal-surgery phase, the recovery handler terminates the process context and returns to its user context with a system call error. For example, XXXXX.
+
+\noindent
+\textbf{Process kill: } When the kernel context accessing a corrupted memory object cannot run consistently even after its internal-surgery but the other active processes can keep running regularly, {\sysname} kills only the process. If the damaged page table page is accessed in the context of its updates, the recovery handler kills the process due to the lost of the updates.
+% \textbf{Process kill: } When the kernel context accessing an corrupted memory object cannot run consistently even after its internal-surgery but the other active processes can keep running regularly, {\sysname} kills only the process. XXXXX is a representative example. XXXXX.
+
+\noindent
+%\textbf{Fail-stop: } {\sysname} decides to fail-stop when the recovery handler cannot perform surgery of damaged memory objects or the OS kernel cannot keep running consistently even if the internal-surgery is successful. For example, XXXXX.
+\textbf{Fail-stop: } {\sysname} decides to fail-stop when the recovery handler cannot perform surgery of damaged memory objects or the OS kernel cannot keep running consistently even if the internal-surgery is successful. For example, \texttt{kmem}, which is an exclusive controller for memory allocation, is damaged and the access to it in \textsf{kfree()} triggers a fail stop to avoid memory leaks due to interrupting a series of memory releases.
+
+% (**DEPENDS ON CONTEXT**)
+The procedures in the after-treatment phase depend largely on the kernel context that accesses a damage memory object and then causes an NMI for the ECC-uncorrectable error. Since the updates of a damaged memory object can be lost in accessing it to write, the process cannot run consistently anymore. The recovery handlers properly choose the procedures with the consideration of the kernel context after the internal-surgery of damaged objects. Specifically, the recovery handler dives into the kernel context to identify the called kernel function before the internal-surgery. The typical example is the page table. Its recovery handler appropriately choose the syscall fail and process kill according to the function history until the handling NMI. The recovery handler causes the process kill in \textsf{mappages()} and \textsf{fork()} because these functions involve the page table updates. On the other hand, it returns syscall errors in update-unrelated kernel functions since the page table contents are consistent across the recovery.
+% The procedures in the after-treatment phase depend largely on the kernel context that accesses a damage memory object and then cause an NMI for the ECC-uncorrectable error. Since the updates of a damaged memory object can be lost in accessing to it to write, the process cannot run consistently anymore. The recovery handlers properly choose the procedures with the consideration of the kernel context after the internal-surgery of damaged memory objects. Specifically, the recovery handler dives into the kernel context to identify the called kernel function before the internal-surgery. The typical example is the page table. Its recovery handler appropriately choose the syscall fail and process kill according to the kernel function that triggers the recovery handler. The recovery handler causes the process kill in \textsf{mappages()} and \textsf{fork()} because these functions involve the page table updates. On the other hand, it performs syscall errors in update-unrelated kernel functions since the page table contents are consistent across the recovery.
+
+%depending on \textsf{fork()} is called or not, because the NMI in that function causes leaving an interrupted on-making page table. As another example, the \texttt{inode} recovery handler chooses process kill when \textsf{sys\_chdir()} is called.This is to avoid losing the current working directory inode pointer of the recovery experienced process.
+% The procedures in the after-treatment phase depend largely on the kernel function that accesses a damage memory object and then cause an NMI for the ECC-uncorrectable error. (**WHY**) The recovery handlers properly choose the procedures with the consideration of the kernel context after the internal-surgery of damaged memory objects. For example, ....
+% 例はカーネルコンテキストによって after-treatment が変わるもの．どう変わるのか，なぜ変わるのかを書く．
+
+Note that our approach can cause a semantics gap between the process's system calls and the kernel survival enforcement. Although a system call successfully updates a in-kernel object and returns a success value to the process, our recovery handler in another process context prunes the updated kernel object to continuously execute the OS kernel. For example, even if an in-memory \texttt{inode} has been updated successfully, the updates are not written back to the on-disk inode when the corresponding dirty \texttt{buf} is broken. {\sysname} offers two modes, \emph{conservative} and \emph{aggressive}, for administrator to choose the strict consistency of system call operations or the kernel survival. The conservative mode does not allow the inconsistency of the process view and system internals and causes {\sysname} to fail-stop while {\sysname} forcefully keeps running at the expense of the process view inconsistency in the aggressive mode.
+
+% (**OBJECT OUT OF THE TARGET**)
+We also note that ten objects are out of the recovery target and {\sysname} fail-stops when these objects are damaged, as shown in Table~\ref{tbl:handle_overview}. For example, it is hard to recover the objects that are accessed in the beginning of the NMI handler, such as \texttt{cpu} and \texttt{proc}, because the NMI occurs in the NMI handler's prologue recursively and thus cannot invoke recovery handlers. Also, memory objects allocated only in the stack, such as \texttt{superblock} and \texttt{dinode}, are hard to recover. Different from the recovery of memory objects in the heap, the on-stack object cannot be swapped to the newly-allocated one by updating other objects' pointers. Exploring recovery methods from the damage of these memory objects is an important topic to improve the reliability of the OS kernels.
+
+
+%Although 13 kinds of kernel internal objects are targets of recovery, we judged that 10 objects are out-of-the-target of this work, as shown in Table~\ref{OutofRecoveryTargets}. This is because losing process context is vital for system survival (\texttt{cpu}, \texttt{proc}, \texttt{context}, and \texttt{trapframe}), solving contradiction between Virtio is difficult (\texttt{disk}), and object reconstruction by reallocating heap region can't apply to objects in the kernel stack.
+
+
+%% \subsubsection{Surgery of Internal Structures}
+%% \label{subsubsec:surgery}
+% In this step, recovery handlers reconstruct broken objects by restoring broken objects contents from other objects as much as possible, initializing, or simply disposing broken objects. With the assumption, memory objects experienced ECC-uncorrectable errors have to be out-of-use by disposing them to prevent accesses after recovery. However, most of objects can affect the continued operations after recovery if they are simply disposed due to lack of objects that is needed to system functionality. In addition, there are some cases in which only the objects itself are needed (without contained data), and cases in which the stored data also needed to keep the system running. To address these difference in the need for system survive, reconstruction branches three policies according to these difference, specifically, whether it can be simply disposed and whether the data stored in the objects is necessary for the continued operation of the system.
+% \par The first policy is to \emph{restore} damaged objects. This is a policy to restore the broken objects status before corruption by specifying the value of the members based on other objects data, or by assigning the replicated data. This policy applies to kinds of memory objects which are able to extract information for restoration or preparing replica for recovery.
+% \parThe second policy is to \emph{initialize} damaged objects. This policy is not to restore status of broken memory objects but to provide new objects that substitute for broken one. It applies to kinds of objects which are not able to extract enough information for status restoration but needed to keep the system running.
+% \par The final policy is to \emph{dispose} damaged objects. This does not reconstruct broken objects, but prevent memory access to error experienced memory space. This policy applies to memory objects which are difficult to extract enough information to recover objects status and not needed to keep the system running.
+% \par In addition to these policies, recovery handlers delete broken memory objects address from A-List and register new objects to A-List to keep it up to date.
+
+%% In the first step, recovery handlers reconstructive surgery of damaged objects by three different ways: \emph{Pruning}, \emph{Initializing} and \emph{Restoring}.
+%% In general, memory regions experienced ECC-uncorrectable errors have to be out-of-use to prevent accesses after recovery.
+%% However, naive damaged objects pruning can affects the continued operations after recovery, because most of objects are needed to system functionality.
+%% In addition, there are some cases in which only the objects itself (without contained data), but also the data stored in the broken objects are needed to keep the system running.
+%% To address different needs for system survive, reconstructive surgery branches three policies according to the difference, specifically, whether it can be simply pruned and whether the stored data is necessary.
+
+%% \par The \emph{Pruning} policy does not reconstruct broken objects, but only prevents memory accesses to error experienced objects.
+%% This policy applies to memory objects which are difficult to extract enough information from other objects to recover objects status and are not needed to keep the system running.
+
+%% \par The second policy is to \emph{Initializing}, which isn't to restore status of broken memory objects but to provide new objects that substitute for broken one.
+%% It applies to kinds of objects which aren't able to extract enough information but needed to system functionality.
+
+%% \par The final policy is \emph{Restoring} damaged objects.
+%% This policy restores the broken objects status before the corruption by specifying the value of the members based on other objects data, or by assigning the replica data.
+%% Memory objects which are able to extract enough amounts of information for restoration or preparing replica for recovery employ this policy.
+
+%% \par After reconstructive surgery, recovery handlers have to solve inconsistencies between reconstructed objects and other undamaged objects, including A-List.
+%% Even if broken memory objects are reconstructed correctly, the system crash or wrong behavior risks remain after recovery due to neglected inconsistencies among reconstructed objects and other objects.
+%% Thus, solving inconsistencies is an essential operation to keep system running after recovery.
+%% In general, correct objects that have dependencies on damaged objects are initialized or assigned proper values, but the operations depend on the object types and the time at which memory errors are detected.
+%% Between A-List, every recovery handler has to delete damaged object's address and register new object's address to A-List in order to keep up-to-date.
+
+%% \subsubsection{Exposure of the Error}
+%% \label{subsubsec:exposure}
+% In this step, recovery handlers determine how to finish the series of recovery operations properly because recovery handlers must not finish by return. When an NMI caused by ECC-uncorrectable errors occurs, even after recovery, the recovery process cannot return to the interrupted point unlike normal interrupt. That is, the instruction which the NMI occurred is equal to the instruction that touched the memory error point. Since instruction holding address is not updated after recovery, returning to interrupted location causes same NMI. And futhermore, local variables which have pointers to broken objects also causes same NMI because these local variables hold onto same address as pointers. Thus recovery operations must be finished not returning interrupted location.
+% \par The three termination ways, \emph{Fail Stop}, \emph{Syscall Fail} and \emph{Process Kill}, are divided by the type of recovered memory objects and the calling history until NMI occurs. Recovery handlers finish recovery operations with \emph{Fail Stop} when unrecoverable area or objects are broken. In the case of process killing is needed after recovery, recovery handlers call \texttt{exit()} and make recovery process to kill itself (\emph{Process Kill}). Otherwise, recovery operations are finished by failing system call intentionally.
+% \par In the ECC-uncorrectable error recovery, depending on the broken memory objects and NMI occurred location, recovery handlers cannot remove inconsistencies completely even after solving inconsistencies phase (e.g., contents of disk write are partially lost). In deciding the termination way, the termination method should be switched according to the viewpoint that is important for the system recovery (i.e., to make the system alive at any cost or system crash is better than leaving inconsistencies by recovery). To realize such functionality, we introduce two recovery mode: Aggressive and Conservative. In Aggressive mode, recovery handler orients the system surviving rather than leaving some inconsistencies. On the other hand, in Conservative mode, recovery handler does not allow to remain inconsistencies in the system rather than the system alive, so they make the system stop when inconsistencies may leave. By set the recovery mode according to the purpose, the system users can choose recovery ability which reflect their needs. In the following sentences, we summarize memory objects semantics of each modules instantly, and explain what recovery handlers do in every recovery step.
+
+%% This step determines how to expose the fact that a ECC-uncorrectable error has occurred, in other words, how to finish the series of recovery operations and user space operations appropriately whether the three ways: \emph{Syscall Fail}, \emph{Process Kill} or \emph{Fail-Stop}.
+%% Up to the previous step, recovery operations are transparent to the user space like other normal traps, but in exiting from error recovery, we have to expose the fact of error occurrence to user space as well unlike normal traps.
+%% In the case of memory error, the addresses in the interrupted instruction or local variables still point affected memory regions even after completion recovery handling.
+%% For this reason, in order to avoid accessing the same error point by returning like a normal trap, recovery operations and system calls issued by user have to be finished including by safe way that does not affect subsequent operations.
+%% \par The three termination ways are divided by the type of recovered memory objects and the function call history until the NMI.
+%% Recovery handlers finish recovery operations with \emph{Fail Stop} when unrecoverable area or objects are broken.
+%% In the case of process killing is needed after recovery, recovery handlers call \textsf{exit()} and make recovery process to kill itself (\emph{Process Kill}).
+%% Otherwise, recovery operations are finished by \emph{Syscall Fail} intentionally.
+%% \par The policy of exposure should be able to reflect the administrator's requirement in terms of what is important to handle ECC-uncorrectable error.
+%% Depending on the damaged objects and NMI occurred locations, recovery handlers cannot remove inconsistencies completely even after surgery phase (e.g., partially lost contents of disk write).
+%% In this case, the administrator is faced with two serious choices: \emph{system survival at any cost} or \emph{do not overlook any inconsistencies}.
+%% To realize both of choice, we introduce two recovery mode, \emph{Aggressive} and \emph{Conservative}, that can switch the system survival policies according to the purpose.
+%% In Aggressive mode, recovery handlers orient the system surviving rather than leaving some inconsistencies.
+%% On the other hand, in Conservative mode, recovery handlers do not allow to remain inconsistencies in the system rather than the system alive, so they make the system stop if some inconsistencies may leave.
+
+
+% FS におけるリカバリ概要
+\begin{table*}[ht]
+  %\caption{Memory Object Recovery on File System\label{tbl:rh_fs}}
+  \caption{Memory Object Handling Overview\label{tbl:handle_overview}}
+  \vspace*{-2mm}
+  \centering
+  \begingroup
+  \renewcommand{\arraystretch}{1.2}
+  \resizebox{18cm}{!}{
+    \begin{tabular}{|c||c|c|c|c|}
+      \hline
+      Name & Semantics & Group & Internal-Surgery & After-Treatment \\
+      \hline \hline
+      \texttt{buf(bcache)} & buffer cache & Initializing &
+        \begin{tabular}{p{7.5cm}}
+          Allocates a new \texttt{buf} node, recovers \texttt{lock} in \texttt{buf} by calling \texttt{sleeplock}'s recovery handler, swaps it with the damaged \texttt{buf}, and updates the pointers to the \texttt{buf} in \texttt{log} and \texttt{disk}.
+          Finally, releases \texttt{log} and \texttt{inode} locks.
+          %array contents but replace new node with damaged node in the list.
+          %In the case of \texttt{buf} node that was scheduled to be written to disk is broken, keep consistencies between
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Fail Stop (Conservative (\textsf{bwrite()}))\\
+          Process Kill (\textsf{exit()}, \textsf{iupdate()})\\
+          Syscall Fail (Other 21 using functions)
+          % Syscall Fail (Others)
+        \end{tabular} \\
+      \hline
+
+      \texttt{log} &
+        \begin{tabular}{c}
+          In-memory\\journaling log\\metadata
+        \end{tabular} & Restoring &
+        \begin{tabular}{p{7.5cm}}
+          Recreates \texttt{log} by reading on-disk \texttt{log} and recovering \texttt{lock} by calling \texttt{spinlock}'s recovery handler, \texttt{logheader}'s replica, and replicated outstanding value.
+          Replicates \texttt{logheader} and copies from the replica with the damaged one.
+          Finally, releases corresponding \texttt{buf} and \texttt{inode}.
+          %% In restoring \texttt{struct log}, read \texttt{log} data in disk and assign to \texttt{log} and store correct value to \texttt{outstanding} from its replica.
+          %% In restoring \texttt{struct logheader}, restore data difficult to recover by copying correct data from prepared \texttt{logheader}'s replica.
+          %% Avoid dead lock by releasing locks which is included writing \texttt{buf} node or \texttt{inode}.
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Fail Stop (Conservative (\textsf{log\_write()}))\\
+          Process Kill (\textsf{end\_op()}~\&~\textsf{sys\_chdir()}, \textsf{exit()})\\
+          % Process Kill (\textsf{sys\_exit()}, \textsf{log\_write()},\\\textsf{end\_op()}~\&~\textsf{sys\_chdir()})\\
+          Syscall Fail (Other nine using functions)
+          % Syscall Fail (Others)
+        \end{tabular} \\
+      \hline
+
+%       \begin{tabular}{c}
+%         \texttt{logheader}
+%       \end{tabular} & Restoring & \texttt{log}'s metadata &
+%         \begin{tabular}{p{9cm}}
+%           Replicates \texttt{logheader} and swaps the replica with the damaged one.
+% %          Recreates \texttt{log} by reading on-disk \texttt{log}, \texttt{logheader}'s replica, and replicated texttt{outstanding}.
+%           %% In restoring \texttt{struct log}, read \texttt{log} data in disk and assign to \texttt{log} and store correct value to \texttt{outstanding} from its replica.
+%           %% In restoring \texttt{struct logheader}, restore data difficult to recover by copying correct data from prepared \texttt{logheader}'s replica.
+%           %% Avoid dead lock by releasing locks which is included writing \texttt{buf} node or \texttt{inode}.
+%         \end{tabular} &
+%         \begin{tabular}{p{5.5cm}}
+%           Fail Stop (Conservative (\textsf{log\_write()}))\\
+%           Process Kill (\textsf{sys\_exit()}, \textsf{log\_write()},\\\textsf{end\_op()}~\&~\textsf{sys\_chdir()})\\
+%           Syscall Fail (Others)
+%         \end{tabular} \\
+%       \hline
+
+      \texttt{file(ftable)} &
+        \begin{tabular}{c}
+          Opened file's pointers
+        \end{tabular} & Initializing &
+        \begin{tabular}{p{7.5cm}}
+          Creates a new \texttt{ftable} that has an array of \texttt{file}s, recovers \texttt{ftable}'s \texttt{spinlock} by calling the recovery handler, initializes damaged \texttt{file}, restores undamaged \texttt{file}'s entry from the old \texttt{ftable}, updates pointers in \texttt{proc}, and decrements the reference counter of \texttt{inode} that points to the damaged \texttt{file}.
+          Finally, releases \texttt{log}'s lock.
+%          Reconstruct whole of \texttt{ftable}, then initialize broken \texttt{file} node and restore other healthy nodes by copying old \texttt{ftable}'s contents. Change \texttt{ofile} of each \texttt{struct proc} to point new nodes. In \texttt{struct inode}, search \texttt{inode} which corresponds to broken \texttt{file} node and call \textsf{iput()} to decrement \texttt{inode}'s reference count correctly. In \texttt{struct pipe}, cancel pipe operation when corresponding node is broken.
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Fail Stop (Conservative (\textsf{sys\_write()}))\\
+          %Fail Stop (Conservative (\textsf{sys\_write()}, \textsf{sys\_close()}))\\
+          Process Kill (\textsf{exit()}, \textsf{sys\_fork()})\\
+          %Process Kill (\textsf{sys\_close()}, \textsf{sys\_fork()}, \textsf{sys\_exit()})\\
+          Syscall Fail (Other 15 using functions)
+          % Syscall Fail (Others)
+        \end{tabular} \\
+      \hline
+
+      \texttt{inode(icache)} &
+        \begin{tabular}{c}
+          In-memory\\file metadata
+        \end{tabular} & Initializing &
+        \begin{tabular}{p{7.5cm}}
+          % Creates a new \texttt{icache} that has an array of \texttt{inode}s, recovers its \texttt{spinlock} and the damaged \texttt{inode}'s \texttt{sleeplock} by calling the recovery handlers, initializes the damaged \texttt{inode} and its \texttt{file} entry, registers the other \texttt{inode}s to new \texttt{icache}, updates pointers to the undamaged \texttt{inode}s in \texttt{struct proc}. If processes wait for the old \texttt{inode}'s sleeplock, the handler kills them and decrements \texttt{log}'s \texttt{outstanding} value.
+          Creates a new \texttt{icache} that has an array of \texttt{inode}s, recovers its \texttt{spinlock} and the damaged \texttt{inode}'s \texttt{sleeplock} by calling the recovery handlers, initializes the damaged \texttt{inode} and its \texttt{file} entry, registers the other \texttt{inode}s to new \texttt{icache}, updates pointers to the undamaged \texttt{inode}s in \texttt{proc}, and decrements \texttt{log}'s outstanding value. If processes wait for the old \texttt{inode}'s sleeplock, the handler fail-stops in conservative mode.
+          % Reconstruct whole of \texttt{icache}, then initialize broken \texttt{inode} node and restore other healthy nodes by copying old \texttt{icache}'s contents.
+          % All \texttt{file} nodes corresponding to broken \texttt{inode} are initialized, and change \texttt{cwd} of each \texttt{struct proc} to point new \texttt{inode}s.
+          % Also, waiting old inode's sleeplock process are killed to avoid referencing old inodes, and decrement \texttt{log}'s outstanding.
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Fail Stop (\texttt{T\_DEV}, Conservative (\textsf{sys\_exit()}, \textsf{sys\_write()}, \textsf{sys\_close()}, \textsf{itrunc()}, \textsf{iput()}, \textsf{bfree()}, \textsf{iupdate()}, \textsf{writei()}, \textsf{bwrite()}, \textsf{create()}, holding sleeplock by other processes))\\
+          Process Kill (\textsf{sys\_chdir()}, \textsf{sys\_close()}, \textsf{sys\_fork()})\\
+          Syscall Fail (Other 19 using functions)
+          % Syscall Fail (Others)
+        \end{tabular} \\
+      \hline
+
+      \texttt{pipe} & Pipe's buffer & Initializing &
+        \begin{tabular}{p{7.5cm}}
+          Repaired by calling \texttt{spinlock}'s recovery handler, reading the corresponding \texttt{file}s, and restoring \texttt{readopen} and \texttt{writeopen} to make the pipe operations fail.
+          % Repaired by calling spinlock's recovery handler and reading the corresponding \texttt{file}s if its \texttt{lock}, \texttt{readopen} , and \texttt{writeopen} are damaged. Otherwise, the pipe operation is failed.
+          %% Among the membepfrs of this object, only \texttt{readopen} and \texttt{writeopen} are initialized by appropriate values so that they correspond to \texttt{file}s in \texttt{ftable} correctly.
+          %% However, the pipe operation is failed intentionally to keep the system alive.
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Syscall Fail
+        \end{tabular} \\
+      \hline
+
+      \texttt{cons} & Console's buffer & Initializing &
+        \begin{tabular}{p{7.5cm}}
+          Allocates a new \texttt{cons} and recovers \texttt{lock} in \texttt{cons} by the calling spinlock recovery handler.
+          Initializes its member values: \texttt{buf}, \texttt{r}, \texttt{w}, and \texttt{e}.
+          % Member \texttt{lock} is recovered by calling \texttt{spinlock}'s recovery handler.
+          % Member \texttt{buf} which buffers input contents and \texttt{r, w, e} which are read/write/edit indexes in the buffer are initialized.
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Fail Stop (\textsf{consoleintr()})\\
+          Syscall Fail (Other three using functions)
+          % Syscall Fail (Others)
+        \end{tabular}  \\
+      \hline
+
+      \texttt{devsw} &
+        \begin{tabular}{c}
+          Special device\\r/w function pointers
+        \end{tabular} & Restoring &
+        \begin{tabular}{p{7.5cm}}
+          Allocates a new \texttt{devsw}, sets same function pointers as the original,
+          releases the \texttt{sleeplock}s in \texttt{buf} and \texttt{inode} which recovery process holds on.
+          % Allocating new memory page for new \texttt{devsw}, and assign same function pointers that were stored in the original.
+          % Releases \texttt{sleeplock}s of \texttt{buf} and \texttt{inode} which recovery process holds on to avoid dead-lock.
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Syscall Fail
+        \end{tabular} \\
+      \hline
+
+      \texttt{pr} &
+        \begin{tabular}{c}
+          \textsf{printf()}'s\\exclusive controller
+        \end{tabular} & Restoring &
+        \begin{tabular}{p{7.5cm}}
+          Allocates a new \texttt{pr} and recovers \texttt{lock} in \texttt{pr} by calling spinlock recovery handler.
+          Initializes \texttt{locking} based on being in \textsf{panic()} or \textsf{kerneltrap()}.
+          % Member \texttt{lock} is recovered by calling \texttt{spinlock}'s recovery handler.
+          % initializing value of member \texttt{locking} depends on whether \textsf{panic()} or \textsf{kerneltrap()} is in recovery process's call stack.
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Fail Stop (\textsf{panic()}, \textsf{kerneltrap()})\\
+          Process Kill (Other two using functions)
+          % Process Kill (Others)
+        \end{tabular} \\
+      \hline
+
+      \texttt{spinlock} &
+        \begin{tabular}{c}
+          Exclusive controller\\(spinlock)
+        \end{tabular} & Restoring &
+        \begin{tabular}{p{7.5cm}}
+          Reallocates a new \texttt{spinlock} or initializes given one and restores the lock status based on the kernel function call history.
+          % After reallocate a memory page for \texttt{spinlock} region to reconstruct or initialize region that is pointed out by given pointer,
+          % decide the lock status should be locked or unlocking from the NMI callee function in call stack.
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Depends on the memory object which has the \texttt{spinlock} as a member.
+        \end{tabular} \\
+      \hline
+
+      \texttt{sleeplock} &
+        \begin{tabular}{c}
+          Exclusive controller\\(sleeplock)
+        \end{tabular} & Restoring &
+        \begin{tabular}{p{7.5cm}}
+          Reallocates a new \texttt{sleeplock} or initializes given one , recovers \texttt{lk} in \texttt{sleeplock} by calling \texttt{spinlock}'s recovery handler, and restores the lock status based on the kernel function call history.
+          % After reallocate a memory page for \texttt{spinlock} region to reconstruct or initialize region that is pointed out by given pointer,
+          % Recover \texttt{spinlock lk} which manages exclusive control of \texttt{sleeplock} by calling \texttt{spinlock}'s recovery handler.
+          % Decide the lock status should be locked or unlocking from the NMI callee function in call stack.
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Depends on the memory object that has the \texttt{sleeplock} as a member.
+        \end{tabular} \\
+      \hline
+
+      \texttt{kmem} &
+        \begin{tabular}{c}
+          Exclusive controller\\in memory allocation
+        \end{tabular} & Restoring &
+        \begin{tabular}{p{7.5cm}}
+          Allocates a new \texttt{kmem}, restores the free page list pointer from \texttt{run}'s {\alist}, and recovers \texttt{lock} in \texttt{kmem} by calling \texttt{spinlock}'s recovery handler.
+          Closes \texttt{file}s in the pipe operation, releases \texttt{proc} and \texttt{log}'s lock, and decrements the outstanding value based on the function call history.
+          % After allocating a memory page for new \texttt{kmem}, restore by assigning the beginning address of free list which is identified from \texttt{struct run}'s A-List.
+          % Do inconsistency check in \texttt{file} and \texttt{proc} which can remain inconsistencies after \texttt{kmem} recovery, and \texttt{log} additionally in process killing cases.
+        \end{tabular} &
+      \begin{tabular}{p{5.5cm}}
+          Fail Stop (\textsf{kfree()} \& initproc)\\
+          Process Kill (\textsf{sys\_sbrk()}, \textsf{sys\_fork()}, \textsf{kfree()})\\
+          Syscall Fail (\textsf{sys\_fork()} \& \textsf{allocproc()}, \textsf{sys\_fork()} \& \textsf{uvmcreate()}, and other two using functions)
+          % Syscall Fail (\textsf{sys\_fork()} \& \textsf{allocproc()}, \textsf{sys\_fork()} \& \textsf{uvmcreate()}, and others)
+        \end{tabular} \\
+
+      \hline
+      \texttt{run} & Metadata for free page & Pruning &
+        \begin{tabular}{p{7.5cm}}
+          Identifies the damaged \texttt{run} node and changes its pervious node's pointer from broken node to next node.
+          Closes \texttt{file}s in the pipe operation, releases \texttt{proc} and \texttt{kmem}'s locks based on the function call history.
+          % Identify broken \texttt{run} node from \texttt{run}'s A-List, then change its pervious node's pointer from broken node to point to next node.
+          % Do inconsistency check in \texttt{file} and \texttt{proc} which can remain inconsistencies after \texttt{run} recovery.
+        \end{tabular} &
+      \begin{tabular}{p{5.5cm}}
+          Process Kill (\textsf{sys\_sbrk()}, \textsf{sys\_fork()}, \textsf{kfree()})\\
+          Syscall Fail (\textsf{sys\_fork()} \& \textsf{allocproc()}, \textsf{sys\_fork()} \& \textsf{uvmcreate()}, and other one using functions)
+          % Syscall Fail (\textsf{sys\_fork()} \& \textsf{allocproc()}, \textsf{sys\_fork()} \& \textsf{uvmcreate()}, and others)
+        \end{tabular} \\
+
+      \hline
+      page table & Page table & Restoring &
+        \begin{tabular}{p{7.5cm}}
+          L2, L1 : Allocates a new page and restores mapping information from the replica managed by \emph{PTDUP}\@.
+          L0 : Allocates a new page and restores mapping information from our direct segment-based metadata.
+          Updates the corresponding \texttt{pagetable} value in \texttt{proc} in the L2 case and modifies an upper/lower level page table entries to new one if needed.
+          % L2: Restore by copying mapping information that \emph{PTDUP} replications manage to new allocated page table, and solve inconsistency between \texttt{proc}'s member \texttt{pagetable}.\\
+          % L1: Restore from \emph{PTDUP} as same as L2 page table.\\
+          % L0: Restore by copying mapping information which is reconstructed from \emph{PTDS} and \emph{PTED} replications to new allocated page table.\\
+          % L1 and L0 need to harmonize with upper level table, and all level check inconsistencies between \texttt{log/logheader} in all levels.
+        \end{tabular} &
+        \begin{tabular}{p{5.5cm}}
+          Fail Stop (Conservative (\textsf{sys\_write()}, \textsf{sys\_close()}, \textsf{itrunc()}, \textsf{iput()}, \textsf{bfree()}, \textsf{iupdate()}, \textsf{writei()}, \textsf{bwrite()}, \textsf{create()}, \textsf{log\_write()})) \\
+          Process Kill (\textsf{fork(), exec(), kvminit(), mappages(), walk()})\\
+          Syscall Fail (Other 16 using functions)
+          % Syscall Fail (Others)
+        \end{tabular} \\
+      \hline
+
+      \hline \hline
+      \multicolumn{5}{|c|}{Out-of-Recovery Target Object Names (Semantics)}\\
+      %  Object Name & Semantics & Group & \multicolumn{2}{|c|}{Reason of Out of Recovery Targets}\\
+      \hline \hline
+      \multicolumn{5}{|p{20cm}|}{ \texttt{cpu}~(Per-CPU~state); \texttt{proc}~(Per-process~state); \texttt{disk}~(Virtio disk device metadata); \texttt{elfhdr},~\texttt{proghdr}~(ELF~headers); \texttt{superblock}~(On-disk~superblock); \texttt{dirent},~\texttt{dinode}~(On-disk~inode structures); \texttt{trapframe}~(Saved~registers~for~user~trap); \texttt{context}~(Saved~registers~for~kernel~context~switch)}\\
+      % \multirow{2}{*}{\texttt{cpu}} & \multirow{2}{*}{Per-CPU state} & \multirow{2}{*}{Out-of-Target} &
+      %   \multicolumn{2}{|p{14cm}|}{
+      %   %\begin{tabular}{p{13cm}}
+      %     Because of having \texttt{context} as a member, execution status of scheduler is lost due to \texttt{context} corruption and the scheduler will not be able to operate.
+      %   %\end{tabular}} \\
+      %   }\\
+      % \hline
+
+      % \multirow{2}{*}{\texttt{proc}} & \multirow{2}{*}{Per-process state} & \multirow{2}{*}{Out-of-Target} &
+      %   \multicolumn{2}{|p{14cm}|}{
+      %     % \begin{tabular}{p{13cm}}
+      %     Because of having \texttt{context} as a member, execution status in context switching is lost due to \texttt{context} corruption and the scheduler will not be able to operate in/after context switching.\
+      %   % \end{tabular} \\
+      %   }\\
+      % \hline
+
+      % \multirow{2}{*}{\texttt{disk}} & \multirow{2}{*}{
+      %   \begin{tabular}{c}
+      %     Virtio disk device\\metadata
+      %   \end{tabular}} & \multirow{2}{*}{Out-of-Target} &
+      %   \multicolumn{2}{|p{14cm}|}{
+      %     % \begin{tabular}{p{13cm}}
+      %     Disk I/O via Virtio will not be able to function because inconsistency between Virtio in QEMU occurs when initializing \texttt{disk} during recovery.
+      %   % \end{tabular} \\
+      %   }\\
+      % \hline
+
+      % \texttt{elfhdr}, \texttt{proghdr} & ELF headers & & \multicolumn{2}{|p{14cm}|}{}\\
+      %     \cline{1-2}
+      % \texttt{superblock} & On-disk superblock & Out-of-Target &
+      %   \multicolumn{2}{|p{14cm}|}{
+      %     % \begin{tabular}{p{13cm}}
+      %     These objects are categorized kernel stack's corruptions because they are placed in use on the kernel stack.
+      %   % \end{tabular} \\
+      %   }\\
+      % \cline{1-2}
+      % \texttt{dirent}, \texttt{dinode} & On-disk inode structures & & \multicolumn{2}{|l|}{}\\
+      %   \hline
+
+      % \texttt{trapframe} &
+      %   \begin{tabular}{c}
+      %     Saved registers for\\user trap
+      %   \end{tabular} & \multirow{1.3}{*}{Out-of-Target} &
+      %   \multicolumn{2}{|p{14cm}|}{
+      %     \begin{tabular}{p{14cm}}
+      %       Initialization this objects for recovery causes the user program is not able to restart because user execution status before entering trap is lost due to initialization.
+      %     \end{tabular}}\\
+      % \hline
+
+      % \texttt{context} &
+      % \begin{tabular}{c}
+      %   Saved registers for\\kernel context switch
+      % \end{tabular} & \multirow{1.3}{*}{Out-of-Target} &
+      %   \multicolumn{2}{|p{14cm}|}{
+      %     \begin{tabular}{p{14cm}}
+      %       Initialization this objects for recovery causes the user program is not able to restart because user execution status before context switching is lost due to initialization.
+      %     \end{tabular}}\\
+      \hline
+    \end{tabular}
+  }
+  \endgroup
+  \vspace*{-6mm}
+\end{table*}
+
+
+% Console におけるリカバリ概要
+% \begin{table*}[t]
+%   %\caption{Recovery Handler Summary (Console)\label{tbl:rh_co}}
+%   \caption{Memory Object Recovery on Console\label{tbl:rh_co}}
+%   \centering
+%   \begingroup
+%   \renewcommand{\arraystretch}{1.2}
+%   \resizebox{18cm}{!}{
+%     \begin{tabular}{|c||c|c|c|c|}
+%       \hline
+%       Name & Semantics & Group & Internal-Surgery & After-Treatment\\
+%       \hline \hline
+%       \texttt{cons} & Console's buffer & Initializing &
+%         \begin{tabular}{p{9cm}}
+%           Allocates a new \texttt{cons} and recovers \texttt{lock} in \texttt{cons} by calling spinlock recovery handler.
+%           Initializes \texttt{buf}, \texttt{r}, \texttt{w}, and \texttt{e} in \texttt{cons}.
+%           % Member \texttt{lock} is recovered by calling \texttt{spinlock}'s recovery handler.
+%           % Member \texttt{buf} which buffers input contents and \texttt{r, w, e} which are read/write/edit indexes in the buffer are initialized.
+%         \end{tabular} &
+%         \begin{tabular}{p{3cm}}
+%           Fail Stop (\textsf{consoleintr()})\\
+%           Syscall Fail (Other 177 kernel functions)
+%           % Syscall Fail (Others)
+%         \end{tabular}  \\
+%       \hline
+
+%       \texttt{devsw} &
+%         \begin{tabular}{c}
+%           Special device\\r/w function pointers
+%         \end{tabular} & Restoring &
+%         \begin{tabular}{p{9cm}}
+%           Allocates a new \texttt{devsw} and assigns same function pointers as the original.
+%           Releases sleeplocks of \texttt{buf} and \texttt{inode} which recovery process holds to avoid dead-lock.
+%           % Allocating new memory page for new \texttt{devsw}, and assign same function pointers that were stored in the original.
+%           % Releases \texttt{sleeplock}s of \texttt{buf} and \texttt{inode} which recovery process holds on to avoid dead-lock.
+%         \end{tabular} &
+%         \begin{tabular}{p{3cm}}
+%           Syscall Fail
+%         \end{tabular} \\
+%       \hline
+
+%       \texttt{pr} &
+%         \begin{tabular}{c}
+%           kernel \textsf{printf()}\\exclusive controller
+%         \end{tabular} & Restoring &
+%         \begin{tabular}{p{9cm}}
+%           Allocates a new \texttt{pr} and recovers \texttt{lock} in \texttt{pr} by calling spinlock recovery handler.
+%           Initializes \texttt{locking} depending on \textsf{panic()} or \textsf{kerneltrap()} are called.
+%           % Member \texttt{lock} is recovered by calling \texttt{spinlock}'s recovery handler.
+%           % initializing value of member \texttt{locking} depends on whether \textsf{panic()} or \textsf{kerneltrap()} is in recovery process's call stack.
+%         \end{tabular} &
+%         \begin{tabular}{p{3cm}}
+%           Fail Stop (\textsf{panic()},\\\textsf{kerneltrap()})\\
+%           Process Kill (Other 176 kernel functions)
+%           % Process Kill (Others)
+%         \end{tabular} \\
+%     \hline
+%     \end{tabular}
+%   }
+%   \endgroup
+% \end{table*}
+
+
+% Locks におけるリカバリ概要
+% \begin{table*}[t]
+%   %\caption{Recovery Handlers Summary (Locks)\label{tbl:rh_lk}}
+%   \caption{Memory Object Recovery on Locks\label{tbl:rh_lk}}
+%   \centering
+%   \begingroup
+%   \renewcommand{\arraystretch}{1.2}
+%   \resizebox{18cm}{!}{
+%     \begin{tabular}{|c||c|c|c|c|}
+%       \hline
+%       Name & Semantics & Group & Internal-Surgery & After-Treatment\\
+%       \hline \hline
+%       \texttt{spinlock} &
+%       \begin{tabular}{c}
+%         Exclusive controller\\(spinlock)
+%       \end{tabular} & Restoring &
+%       \begin{tabular}{p{9cm}}
+%         Reallocates a new \texttt{spinlock} or initializes region pointed out by given pointer.
+%         Judges the lock status from the NMI callee functions in the call stack.
+%         % After reallocate a memory page for \texttt{spinlock} region to reconstruct or initialize region that is pointed out by given pointer,
+%         % decide the lock status should be locked or unlocking from the NMI callee function in call stack.
+%       \end{tabular} &
+%       \begin{tabular}{p{4cm}}
+%         Depends on the object which has the \texttt{spinlock} as a member.
+%       \end{tabular} \\
+%       \hline
+%       \texttt{sleeplock} &
+%       \begin{tabular}{c}
+%         Exclusive controller\\(sleeplock)
+%       \end{tabular} & Restoring &
+%       \begin{tabular}{p{9cm}}
+%         Reallocates a new \texttt{sleeplock} or Initializes region pointed out by given pointer, recovers \texttt{lk} in \texttt{sleeplock} by calling \texttt{spinlock}'s recovery handler, and judges the lock status from the NMI callee functions in the call stack.
+%         % After reallocate a memory page for \texttt{spinlock} region to reconstruct or initialize region that is pointed out by given pointer,
+%         % Recover \texttt{spinlock lk} which manages exclusive control of \texttt{sleeplock} by calling \texttt{spinlock}'s recovery handler.
+%         % Decide the lock status should be locked or unlocking from the NMI callee function in call stack.
+%       \end{tabular} &
+%       \begin{tabular}{p{4cm}}
+%         Depends on the object which has the \texttt{sleeplock} as a member.
+%       \end{tabular} \\
+%       \hline
+%     \end{tabular}
+%   }
+%   \endgroup
+% \end{table*}
+
+
+% Memory Allocator と Page Tables におけるリカバリ概要
+% \begin{table*}[t]
+%   %\caption{Recovery Handlers Summary (Memory Allocator \& Others)\label{tbl:rh_ma}}
+%   \caption{Memory Object Recovery on Memory Allocator \& Others\label{tbl:rh_ma}}
+%   \centering
+%   \begingroup
+%   \renewcommand{\arraystretch}{1.2}
+%   \resizebox{18cm}{!}{
+%     \begin{tabular}{|c||c|c|c|c|}
+%       \hline
+%       Name & Semantics & Group & Internal-Surgery & After-Treatment\\
+%       \hline \hline
+%       \texttt{kmem} &
+%         \begin{tabular}{c}
+%           Exclusive controller\\in memory allocation
+%         \end{tabular} & Restoring &
+%         \begin{tabular}{p{9cm}}
+%           Allocates a new \texttt{kmem}, restores free list pointer from \texttt{run}'s {\alist}, and recovers \texttt{lock} in \texttt{kmem} by calling \texttt{spinlock}'s recovery handler.
+%           Closes \texttt{file}s in pipe operation, releases \texttt{proc} and \texttt{log}'s locks, and decrement outstanding value depending on function call history.
+%           % After allocating a memory page for new \texttt{kmem}, restore by assigning the beginning address of free list which is identified from \texttt{struct run}'s A-List.
+%           % Do inconsistency check in \texttt{file} and \texttt{proc} which can remain inconsistencies after \texttt{kmem} recovery, and \texttt{log} additionally in process killing cases.
+%         \end{tabular} &
+%       \begin{tabular}{p{5.5cm}}
+%           Fail Stop (\textsf{kfree()} \& initproc)\\
+%           Process Kill (\textsf{sys\_sbrk()}, \textsf{sys\_fork()}, \textsf{kfree()})\\
+%           Syscall Fail (\textsf{sys\_fork()} \& \textsf{allocproc()}, \textsf{sys\_fork()} \& \textsf{uvmcreate()}, and other 172 kernel functions)
+%           % Syscall Fail (\textsf{sys\_fork()} \& \textsf{allocproc()}, \textsf{sys\_fork()} \& \textsf{uvmcreate()}, and others)
+%         \end{tabular} \\
+%       \hline
+%       \texttt{run} & Empty page & Pruning &
+%         \begin{tabular}{p{9cm}}
+%           Identifies the damaged \texttt{run} node from \texttt{run}'s {\alist}, and changes its pervious node's pointer from broken node to next node.
+%           Closes \texttt{file}s in pipe operation, releases \texttt{proc} and \texttt{kmem}'s locks depending on function call history.
+%           % Identify broken \texttt{run} node from \texttt{run}'s A-List, then change its pervious node's pointer from broken node to point to next node.
+%           % Do inconsistency check in \texttt{file} and \texttt{proc} which can remain inconsistencies after \texttt{run} recovery.
+%         \end{tabular} &
+%       \begin{tabular}{p{5.5cm}}
+%           Process Kill (\textsf{sys\_sbrk()}, \textsf{sys\_fork()}, \textsf{kfree()})\\
+%           Syscall Fail (\textsf{sys\_fork()} \& \textsf{allocproc()}, \textsf{sys\_fork()} \& \textsf{uvmcreate()}, and other 173 kernel functions)
+%           % Syscall Fail (\textsf{sys\_fork()} \& \textsf{allocproc()}, \textsf{sys\_fork()} \& \textsf{uvmcreate()}, and others)
+%         \end{tabular} \\
+%       \hline
+%       page table & Page table & Restoring &
+%         \begin{tabular}{p{9cm}}
+%           L2, L1 : Allocates a new table and restores mapping information from \emph{PTDUP}.\\
+%           L0 : Allocates a new table and restores mapping information from \emph{PTDS} and \emph{PTED}.\\
+%           Updates corresponding \texttt{pagetable} in \texttt{proc} in L2 case or harmonizes with an upper level table in L1 and L0, and commits \texttt{log} if needed in all levels.
+%           % L2: Restore by copying mapping information that \emph{PTDUP} replications manage to new allocated page table, and solve inconsistency between \texttt{proc}'s member \texttt{pagetable}.\\
+%           % L1: Restore from \emph{PTDUP} as same as L2 page table.\\
+%           % L0: Restore by copying mapping information which is reconstructed from \emph{PTDS} and \emph{PTED} replications to new allocated page table.\\
+%           % L1 and L0 need to harmonize with upper level table, and all level check inconsistencies between \texttt{log/logheader} in all levels.
+%         \end{tabular} &
+%         \begin{tabular}{p{5.5cm}}
+%           Fail Stop (Conservative (\textsf{sys\_write()}, \textsf{sys\_close()}, \textsf{itrunc()}, \textsf{iput()}, \textsf{bfree()}, \textsf{iupdate()}, \textsf{writei()}, \textsf{bwrite()}, \textsf{create()}, \textsf{log\_write()})) \\
+%           Process Kill (\textsf{fork(), exec(), kvminit(), mappages(), walk()})\\
+%           Syscall Fail (Other 163 kernel functions)
+%           % Syscall Fail (Others)
+%         \end{tabular} \\
+%       \hline
+%     \end{tabular}
+%   }
+%   \endgroup
+% \end{table*}
+
+
+% リカバリ対象外となったオブジェクトとその理由
+% \begin{table*}[t]
+%   \caption{Summary of Reasons Out of Recovery Targets\label{tbl:or}}
+%   \centering
+%   \begingroup
+%   \renewcommand{\arraystretch}{1.2}
+%   \resizebox{18cm}{!}{
+%     \begin{scriptsize}
+%     \begin{tabular}{|c||c|}
+%       \hline
+%       Object Name & Reason of Out of Recovery Targets \\
+%       \hline \hline
+%       \texttt{cpu} &
+%       \begin{tabular}{p{13cm}}
+%         Because of having \texttt{context} as a member, execution status of scheduler is lost due to \texttt{context} corruption and the scheduler will not be able to operate.
+%       \end{tabular} \\
+%       \hline
+%       \texttt{proc} &
+%       \begin{tabular}{p{13cm}}
+%         Because of having \texttt{context} as a member, execution status in context switching is lost due to \texttt{context} corruption and the scheduler will not be able to operate in/after context switching.\
+%       \end{tabular} \\
+%       \hline
+%       \texttt{disk} &
+%       \begin{tabular}{p{13cm}}
+%         Disk I/O via Virtio will not be able to function because inconsistency between Virtio in QEMU occurs when initializing \texttt{disk} during recovery.
+%       \end{tabular} \\
+%       \hline
+%       \texttt{elfhdr}, \texttt{proghdr} & \\
+%       \cline{1-1}
+%       \texttt{superblock} &
+%         \begin{tabular}{p{13cm}}
+%           These objects are categorized kernel stack's corruptions because they are placed in use on the kernel stack.
+%         \end{tabular} \\
+%       \cline{1-1}
+%       \texttt{dirent}, \texttt{dinode} & \\
+%       \hline
+%       \texttt{trapframe} &
+%         \begin{tabular}{p{13cm}}
+%           Initialization this objects for recovery causes the user program is not able to restart because user execution status before entering trap is lost due to initialization.
+%         \end{tabular} \\
+%       \hline
+%       \texttt{context} &
+%         \begin{tabular}{p{13cm}}
+%           Initialization this objects for recovery causes the user program is not able to restart because user execution status before context switching is lost due to initialization.
+%         \end{tabular} \\
+%       \hline
+%     \end{tabular}
+%     \end{scriptsize}
+%   }
+%   \endgroup
+% \end{table*}
+
+
+% \begin{figure}[t]
+%   \centering
+%   \includegraphics[width = 8.5cm]{./figures/buf_Recovery_Overview1.png}
+%   \vspace*{-2.5mm}
+%   \caption{\texttt{buf} Reconstruction Overview.\label{buf_Recovery_Overview}}
+%   \vspace*{-6mm}
+% \end{figure}
+
+\subsubsection{File System}
+\label{subsec:recoveryhandlerFS}
+We carefully classify all the memory objects in the file system of {\sysname} into the three categories and design their recovery handlers, as shown in Table~\ref{tbl:handle_overview}.
+We categorize \texttt{log} in the restoreing group while other four objects are grouped into the initializing category.
+{\sysname} has no memory objects in the pruning group because the file system issues \textsf{panic()} even if only one memory object is lost.
+% We carefully classify all the memory objects in the file system of {\sysname} into the three categories and design their recovery handlers, as shown in Table~\ref{tbl:handle_overview}. The four objects, \texttt{buf}, \texttt{file}, \texttt{inode}, \texttt{pipe}, are categorized in the initializing group while we group \texttt{log} into the restoring group. {\sysname} has no memory objects in the pruning group because the file system fails and invokes \textsf{panic()} even if only one memory object is lost.
+%% As memory objects in File System (FS), memory objects which manage file and inode's meta data of course, buffer cache which buffers contents of FS, log which implements journaling, and so on, are included.
+%% In these FS objects, \texttt{struct buf, file, log/logheader, inode}, \texttt{pipe} are designated as recovery targets in this work, and \texttt{struct log/logheader} employs \emph{Restoring} policy, and the other employ \emph{Initializing} policy in reconstructive surgery.
+
+For example, {\sysname} performs syscall fails and process kills when the data block caching object, \texttt{buf}, is damaged by an ECC-uncorrectable error. Xv6 uses an array of \texttt{buf} as a doubly-linked list to access each node. When the kernel context accesses the damaged \texttt{buf} and the internal-surgery phase starts, the recovery handler allocates and initializes a new \texttt{buf}, and replaces the damaged \texttt{buf} with the new one in the list. Next, the recovery handler removes the \texttt{buf}'s related objects pointer if they points the damaged one, as described above.
+% For example, {\sysname} performs syscall fails and process kills when the data block caching object, \texttt{buf}, is damaged by an ECC-uncorrectable error. Xv6 manages an array of \texttt{buf} and constructs a doubly-linked list on it to access each \texttt{buf}. When the kernel context accesses the damaged \texttt{buf} and the internal-surgery phase starts, the recovery handler removes the damaged \texttt{buf} from the double-linked list, allocates and initializes a new \texttt{buf}, and adds it to the list. Next, the recovery handler removes the \texttt{buf}'s related objects pointer if they points the damaged one, as described above.
+Also, the spinlock and sleeplock in \texttt{buf} and \texttt{inode} are also adjusted, as described in the following section.
+% For example, {\sysname} performs syscall fails and process kills when the \texttt{buf} is damaged by an ECC-uncorrectable error. The \texttt{buf} is used as a file cache that preserves storage blocks in memory. Xv6 manages an array of \texttt{buf} and constructs a doubly-linked list on it to access each \texttt{buf}. When the kernel context accesses the damaged \texttt{buf} and the internal-surgery phase starts, the recovery handler removes the damaged \texttt{buf} from the double-linked list, allocates and initializes a new \texttt{buf}, and adds it to the list. Next, the recovery handler updates the three \texttt{buf}'s related objects, \texttt{log}, \texttt{inode}, and \texttt{disk}. If these objects have the pointer to the damaged \texttt{buf}, the recovery handler removes the corresponding entries. Also, the spinlock and sleeplock in \texttt{buf} and \texttt{inode} are also adjusted, as described in the following section.
+
+%In the after-treatment phase, the recovery handler traverses the process's kernel stack to identify which kernel function the process accesses the damaged \texttt{buf} in. The process is killed in \textsf{bwrite()}, \textsf{bfree()}, and \texttt{iupdate()} because XXXXX. The process can continue to run with the consistent kernel state in accessing the damaged \texttt{buf} in the other XXXXX functions and thus the recovery handler performs syscall fails as the after-treatment procedure. Note that the conservative mode causes fail-stop in \texttt{bwrite()} since the inconsistency between the process write operation and storage contents occurs due to losing a dirty block.
+In the after-treatment phase, the recovery handler traverses the process's kernel stack to identify the function call history until accessing the damaged \texttt{buf}. The process is killed in \textsf{iupdate()} to prevent inconsistency due to unreflecting inode changes to disk, such as inode truncation, and in \textsf{exit()} to redo process killing. The process can continue to run with the consistent kernel state in accessing the recovered \texttt{buf} in the other \texttt{buf} related functions and thus the recovery handler performs syscall fails as the after-treatment procedure. Note that the conservative mode causes fail-stop in \textsf{bwrite()} since the inconsistency between the process write operation and storage contents can occur due to losing a dirty block.
+% In the after-treatment phase, the recovery handler traverses the process's kernel stack to identify which kernel function the process accesses the damaged \texttt{buf} in. The process is killed in \textsf{iupdate()} to prevent inconsistency due to unreflecting inode changes to disk, such as inode truncation, and in \textsf{exit()} to redo process killing. The process can continue to run with the consistent kernel state in accessing the recovered \texttt{buf} in the other \texttt{buf} related functions and thus the recovery handler performs syscall fails as the after-treatment procedure. Note that the conservative mode causes fail-stop in \textsf{bwrite()} since the inconsistency between the process write operation and storage contents can occur due to losing a dirty block.
+
+%For space limitation, only \texttt{struct buf} is introduced in detail in this paper, and summaries of the recovery of all FS objects are shown in Table.~\ref{tbl:rh_fs}. Similarly, in the other sections of Per-Object Recovery Handlers, we show additional details about only one object for reasons of space limitation, and recovery handling are summarized in each table.
+%% \par The \texttt{struct buf} composes \texttt{bcache}, which plays a role of a buffer cache that has data bodies of file, inode, and so on.
+%% The \texttt{bcache} is constructed by a array of \texttt{struct buf}, but they are accessed as a doubly-linked list, not as a array except in initialization.
+
+%% \subsubsection{Surgery of Internal Structures}
+%% The \texttt{struct buf} recovery employs \emph{Initializing} policy and we show the overview of reconstructive surgery in Fig.~\ref{buf_Recovery_Overview}.
+%% When the \texttt{buf} node is broken, without reconstructing whole of \texttt{bcache}, recovery handler allocates substitute node of broken \texttt{buf} node and add it to the doubly-linked list.
+%% Specifically, the handler follows these steps:
+%% \begin{enumerate}
+%%   \item Search the list and identify previous node of broken node that its member \texttt{next} has broken node pointer.
+%%   \item Similarly, identify next node of broken node that its member \texttt{prev} has broken node pointer.
+%%   \item Update the pointers which points the broken node, delete it from \texttt{buf} list, and insert the new node instead.
+%% \end{enumerate}
+%% In this way, even if the broken node remains on the array, it is not accessed as a doubly-linked list, and the broken node can be recovered.
+%% \par Solving inconsistencies targets are \texttt{struct log/logheader}, \texttt{struct inode}, and \texttt{struct disk}.
+%% Because of stored data block numbers which to be written to disk in \texttt{struct log/logheader}, inconsistency can be remained between the damaged \texttt{buf} node which had data to be written to disk when we don't delete appropriate data block number on \texttt{logheader}.
+%% Thus, recovery handler collates correspondence between recorded data block numbers on the \texttt{logheader} and on the \texttt{bcache}.
+%% If there is a number that does not match, then delete the number on the \texttt{logheader} as if broken node had it.
+%% In the case of \texttt{inode}, \texttt{inode}'s sleeplock can be left locked after recovery, because \texttt{buf} nodes are used in writing \texttt{inode} dirty meta data to disk.
+%% Therefore, recovery handler releases \texttt{inode}'s sleeplock that recovery process is holding and decrements \texttt{inode} reference count by calling \textsf{iput()}.
+%% In \texttt{struct disk}, it buffers contents which read from/write to disk to a \texttt{buf} node, so recovery handler corrects values of \texttt{disk}'s members if using \texttt{buf} node is broken.
+
+%% \subsubsection{Exposure of the Error}
+%% Recovery handler is finished by \emph{Fail Stop} when a part of \texttt{buf} node operating functions were called in conservative mode, or by \emph{Process Kill} in aggressive mode.
+%% Especially, when NMI occurs in \textsf{bwrite()}, which writes in-memory \texttt{buf} contents to disk, recovery handler stop the system in conservative mode because the contents can be lost.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width = 8.5cm]{./figures/PTDS_PTED_mechanism1.png}
+  \vspace*{-2.5mm}
+  \caption{\emph{PTDUP} Compression Mechanism.\label{PTDS_PTED_Mechanism}}
+  \vspace*{-6.5mm}
+\end{figure}
+
+\subsubsection{Memory Manager}
+% \subsubsection{Memory Allocator}
+\label{subsec:recoveryhandlerMA}
+Like the file system case, we classify three objects in the memory manager as shown in Table~\ref{tbl:handle_overview}. {\sysname} treats \texttt{kmem} and page tables as restoring as mentioned before. Also, \texttt{run} is grouped into pruning. {\sysname} performs a syscall fail when a page table is corrupted by an ECC-uncorrectable error. The page table on RISC-V architecture 2019 edition is a three-level page table (L0 to L2). The recovery handler restores the damaged page table page at any-level and replaces the damaged page table page with restored one. To do so, our page table duplication mechanism, called {\ptdup}, duplicates the page tables in an efficient manner. In the internal-surgery phase, the damaged page table pages can be restored from metadata generated by {\ptdup}. If the corrupted page is L2, which is the root page table, the recovery handler updates its pointer, \texttt{pagetable}, in \texttt{proc}. Otherwise, the recovery handler connects existing page table pages from the damaged page table page to the restored one.
+% Like the file system case, we classify three objects in the memory allocator as shown in Table~\ref{tbl:handle_overview}. {\sysname} treats \texttt{kmem} and page tables as restoring because {\sysname} fails to behave consistently without these objects. Also, \texttt{run} is grouped into pruning. {\sysname} performs a syscall fail when a page table is corrupted by an ECC-uncorrectable error. The page table on RISC-V architecture 2019 edition is a three-level page table (L0 to L2). The recovery handler restores the damaged page table page at any-level and replaces the damaged page table page with restored one. To do so, our page table restoration mechanisms, called {\ptdup}, duplicates the page tables in an efficient manner. In the internal-surgery phase, the damaged page table pages can be restored from metadata generated by {\ptdup}. If the corrupted page is L2 page table page that is the root page table, the recovery handler updates its pointer, \texttt{pagetable}, in \texttt{proc}. Otherwise, the recovery handler connects existing page table pages from the damaged page table page to the restored one.
+% {\sysname} doesn't have initializing group object because \texttt{kmem} and page table need content before corruption and initializing \texttt{run} causes another error after reocovery.
+%For exmaple, {\sysname} performs syscall fails when page table is damaged.
+%The page table is manages address mapping in a process, and Xv6 uses the three-level page table mechanism.
+%When {\sysname} starts the ineternal surgery, the recovery handler allocates a new page table, restores mapping information from our duplication mechanism, called \emph{PTDUP (Page Table Duplication)}.
+%Next, the recovery handler updates other objects data, specifically, it updates \texttt{pagetable} in \texttt{proc} in L2 page table corruption or an upper level entry in L1 and L0 corruption, and then, it commits \texttt{log} to disk if log committing is interrupted by recovery operations.
+
+The complete replication of all the page table pages consumes large memory space overhead; the memory space for the page tables becomes double simply. To mitigate the memory space overhead, the {\ptdup} mechanism shrinks the L0 replica, borrowing the idea of the direct segment~\cite{Basu2010} that offers a range-based memory mapping. The direct segment allows us to consolidates the page table entries for contiguous page mappings into one entry. As shown in Fig.~\ref{PTDS_PTED_Mechanism}, the {\ptdup} detects contiguous page mappings of L0 page table and records the ranges of the contiguous regions on the metadata for the restoration of L0 page table pages. It also memorize as-is page table entries for the other page mappings in the metadata. The current prototype records only user bit because some of flags such as valid bit and readable bit are able to set in the internal-surgery phase and the other flags such as dirty and access are ignorable for the recovery.
+% The complete replication of all the page table pages consumes large memory space overhead; the memory space for the page tables becomes double simply. To mitigate the memory space overhead, the {\ptdup} mechanism shrinks the L0 replica, borrowing the idea of the direct segment~\cite{Base2010} that offers a range-based memory mapping. The direct segment allows us to consolidates the page table entries for contiguous page mappings into one entry. As shown in Fig.~\ref{PTDS_PTED_Mechanism}, the {\ptdup} detects contiguous page mappings of L0 page table and records the ranges of the contiguous regions on the metadata for the restoration of L0 page table pages. It also memorize as-is page table entries for the other page mappings in the metadata. The current prototype records only user bit because some of flags such as valid bit and readable bit are able to set in the internal-surgery phase and the other flags such as dirty and access are ignorable in the context of the recovery.
+%% To realize efficient and effective page table mapping duplication, PTDUP mechanism employ different replicating methods between layers.
+%% Naive replicating causes huge amount of memory space overhead since page tables tend to occupy large amount of memory (Sv39 in RISC-V and x86 (64-bit mode) use up to 1 GiB and 513 GiB memory regions per process, respectively).
+%% In PTDUP, L2 and L1 page table replicas are copied, and L0 replicas is conpressed by \emph{PTDS (Page Table Direct Segment)}, which is inspred by the concept of \emph{Direct Segment}\cite{Basu2010}, and \emph{PTED (Page Table Entry Duplication)} mechanisms.
+%% As shown in Fig.~\ref{PTDS_PTED_Mechanism}, PTDS represents multiple entries that both virtual address and physical address are consecutive by a signle entry, and PTED represents an uncontiguous entry.
+%% In PTDS, we only record \texttt{User} bit in PTE's flags because most of other flags are able to set in recovery and other flags are not considered that they don't affect for system survival when they lost.
+% In PTDS, we only record \texttt{User} bit in PTE's flags because basically \texttt{Executable}, \texttt{Writable}, \texttt{Readable} and \texttt{Valid} bits are set in user's page tables and \texttt{Global} bit is set when the PTE is exhibited to all other page tables such as \texttt{TRAPFRAME} or \texttt{TRAMPOLINE}.
+% \texttt{Dirty} and \texttt{Access} bits are considered that they don't affect for making the system surviving when they lost.
+In the after-treatment phase, the recovery handler traverses the process's kernel stack to decide on the procedure and chooses to process kill or syscall fail as mentioned above. The conservative mode performs the fail-stop since the inconsistency between the process write operation and storage contents can appear.
+% In the after-treatment phase, the recovery handler traverses the process's kernel stack to decide on the procedure. The recovery handler kills the process accessing the damage page table for entry updates due to their lost. The conservative mode performs the fail-stop since the inconsistency between the process write operation and storage contents appears.
+
+% Page table recovery requires both necessary and sufficient address mapping information replicating and less memory space overhead at the same time.
+% From recovery viewpoint, page tables are essential to make the system to keep running of course and also it is difficult to extract enough information to restore from other objects.
+% Therefore, page tables replication is essential to make them recoverable, but naive replicating causes too large memory space overhead because it occupies the same amount of page tables as per process additional memory space.
+% In Sv39 used in xv6 (RISC-V) that is the case study in this work, 39 bits of 64 bits address length is used as the offset for three-layer page tables \cite{RISC-VManualVol2}, which means that each process can use up to 1 GiB memory space.
+% Even in x86 architecture, x86 (64-bit mode) in Linux consumes memory regions up to about 513 GiB per process.
+% \par To tackle this challenge of huge memory space overhead, we introduce \emph{Page Table Duplication (PTDUP)}, which switches the way of replication of page tables among the different layers and manages all page table replicas together.
+% PTDUP copies the whole of mapping in L2 and L1 page tables (correspond to PUD and PMD in Linux) as replicas because they occupy relatively low memory spaces.
+% In contrast, it compresses the amount of mapping information of L0 page table (corresponds to PTE in Linux) by introducing a new approach, called \emph{Page Table Direct Segmernt (PTDS)}, since L0 page tables are the most memory-dominant layer in memory-intensive situation.
+% We explain PTDUP and PTDS details through duplicatoin of L2 and L1 page tables and replication of L0 page tables, respectively.
+
+% \subsubsection{\emph{Page Table Duplication (PTDUP)}}
+% \emph{PTDUP} is a mechanism to manage pagetable replications efficiently and effectively.
+% PTDUP associates an original data structure (\texttt{struct ptdup\_head}) and stores pointers to each page table replica.
+% As mentioned abobe, PTDUP simply duplicates L2 and L1 page tables mapping contents.
+% The L2 page tables are duplicated in creating page tables in process allocaton, and L1 page tables are duplicated at creation of it.
+% Of course, since the page tables are updated from time to time, PTDUP tracks and reflects the updates to replicas for keeping up-to-date.
+
+% \subsubsection{\emph{Page Table Direct Segmernt (PTDS)}}
+% PTDS is a compression mechanism of L0 page tables mapping information contents, which occupy a large part of memory usage in page table, without minimum mapping information loss.
+% Fig.~\ref{PTDS_PTED_Mechanism} shows the contrivance of compression by PTDS.
+% This method is inspired by the concept of \emph{Direct Segment}\cite{Basu2010}, and this method represents multiple PTEs as a single entry when both virtual address and physical address are contiguous across multitle entries.
+% On the other hand, uncontiguous PTEs are duplicated as they are by \emph{Page Table Entry Duplication (PTED)} mechanism.
+% By combining these methods, the size of a duplication of recoverable L0 page tables can be compressed by up to about 94 \% (the worst case is the same as the size of a L0 page table, see Sec.~\ref{subsubsec:memoverhead}).
+% \par In the making PTDS, we only record \texttt{User} bit in PTE's flags because basically \texttt{Executable, Writable, Readable} and \texttt{Valid} bits are set in user's page tables and \texttt{Global} bit is set when the PTE is exhibited to all other page tables such as \texttt{TRAPFRAME} or \texttt{TRAMPOLINE}.
+% \texttt{Dirty} and \texttt{Access} bits are considered that they don't affect for making the system surviving when they lost, so we decided not to record them to PTDS (however, it does not mean that there is no affection to the system. For example, changed point can be lost if \texttt{Dirty} bit is changed from 1 to 0 because of recovery).
+
+% \subsection{Page Table Recovery Handler}
+% \label{subsec:recoveryhandlerpagetable}
+% The page table recovery handler do recovery by layer in \emph{Restoring} policy by using \emph{PTDUP, PTDS} and \emph{PTED}. Although the detailed methods are different by layer, all layers share some common operations.
+% \textbf{\emph{Reconstruct}} \indent As a preprocessing of \emph{Reconstruct}, recovery handler has to identify which page table is broken due to ECC-uncorrectable error.  Specifically, recovery handler comprehends which layer and processes's page table is broken and gains the beginning address of it by using A-List. Then, recovery handler distinguishs which PTDUP should be used from process ID (\texttt{pid}) and comprehended layer. After that, reconstruction opration branches off to layer-by-layer operaions.
+% \textbf{\emph{Solve Inconsistencies}} \indent Before finishing recovery, recovery handler has to release locks which recovery process holds on because some locks can be left with holding depending on when the NMI occurs and causes dead lock after recovery. In addition to this, if a NMI occuers during log write, recovey operaions can be finished without log writing correctly, and kernel panic due to oversizing \texttt{logheader} can be issued. Thus, recovery handler writes log contents to the disk before completing recovery.
+% \textbf{\emph{Determine Termination}} \indent Although recovery operaion is finished by \emph{Syscall Fail} basically, \emph{Process Kill} is used in the case of \texttt{exit()} was called or any functions in address area from \texttt{kvminit()} to \texttt{copyintr()}.
+
+% \subsubsection{L2 Page Table}
+% \textbf{\emph{Reconstruct}} \indent In L2 page table recovery, the handler copies replica of PTDUP L2 page table to an allocated memory page and fixes the pointer to L2 page table in corresponding \texttt{struct proc}. Then, recovery handler registers new L2 page table to A-List and deletes broken L2 page table from A-List.
+%\textbf{\emph{Solve Inconsistencies}} \indent There is no need to fix other layer page tables to maintain consistency in L2 page table recovery.
+
+% \subsubsection{L1 Page Table}
+% \textbf{\emph{Reconstruct}} \indent In L1 page table recovery, same as L2, the handler copies complite replica of PTDUP L1 page table to an allocated page, registers new to A-List and deletes old from it.
+
+% \textbf{\emph{Solve Inconsistencies}} \indent L1 page table recovery has to solve inconsistency between the upper layer tables, or the real and replica L2 page table. The real one and replica holds on old entry of L1 page table, so it is possible to keep consistency by rewriting them to new ones.
+
+% \subsubsection{L0 Page Table}
+% \textbf{\emph{Reconstruct}} \indent Recovery handler of L0 page table needs to restore mapping infomation from PTDS and PTED. Restoring mapping information from PTDS is achieved by reconstructing each entry from \texttt{PPN} and \texttt{User} bit which is kept in the PTDS entry and supplementing \texttt{XRWN} flags, and recompressing the compressed entries. In addition to that, uncontiguous entries are restored by copying PTEDs. At last, as same as other layers, recovery handler adds new L0 page table node to A-List and removes old one from it.
+% \textbf{\emph{Solve Inconsistencies}} \indent % In the L0 page table solving inconsistencies phase, upper layer, or both of the real and replica L1 page tables are overwrited correctly like in the case of L1 corruption.
+% The page table recovery handler do recovery by layer in \emph{Restoring} policy by using \emph{PTDUP, PTDS} and \emph{PTED}.
+% Although the detailed methods are different by layer, all layers share some common operations.
+
+% \subsubsection{Surgery of Internal Structures}
+% As a preprocessing of reconstructive surgery, recovery handler has to identify which page table is broken due to ECC-uncorrectable errors.
+% Specifically, recovery handler comprehends which layer and processes's page table is broken, gains the beginning address by A-List and distinguishs which PTDUP should be used from process ID.
+% \par While the basic surgery policy is the same for \emph{Restoring}, the restoration opration details differ between L2 and L1 layers and L0 layer after allocating a new page.
+% Specifically, L2 and L1 page tables are restored by simply copying mapping information from replica, but L0 page tables need to be reconstruct restoring mapping infomation from PTDS and PTED replicas.
+% Restoration mapping information from PTDS is achieved by reconstructing each entry from PPN, User bit which are kept in the PTDS entry and supplementing \texttt{XRWV} flags, and decompressing the compressed entries.
+% In addition to that, uncontiguous entries are restored by copying PTEDs.
+
+% \par Before finishing recovery, recovery handler has to solve inconsistencies not only among other types of objects, but also different layer page tables.
+% To solve inconsistencies between upper layer, the handler has to update upper table's mapping when L1 and L0 page table recovery.
+% In L2 page table recovery, \texttt{struct proc}'s member \texttt{pagetable} stores current page table pointer, so it need to be update from old to new.
+% In addition to that, recovery handler also has to release locks which recovery process holds on because some locks can be left with holding depending on when the NMI occurs and causes dead lock after recovery.
+% If a NMI occuers during log write, recovey operaions can be finished without log writing correctly, and kernel panic due to oversizing \texttt{logheader} can be issued.
+% Thus, recovery handler writes log contents to the disk before completing recovery.
+
+% \subsubsection{Exposure of the Error}
+% Although recovery operaion is finished by \emph{Syscall Fail} basically, \emph{Process Kill} is used in the case of \textsf{exit()} was called or any functions in address area from \textsf{kvminit()} to \textsf{copyintr()}.
+
+%% Memory allocator module has two objects related to physical memory allocation, \texttt{struct kmem, struct run}, both are designated as recovery targets. Of these two, \texttt{struct kmem} employs \emph{Restore} policy, and \texttt{struct run} employs \emph{Dispose} policy in recostruction step.
+% Memory allocator module has two objects related to physical memory allocation, \texttt{struct kmem, struct run}, both are designated as recovery targets.
+% We describe only about \texttt{struct run}, and all objects recovery handling in memory allocator are summarized in Table.~\ref{tbl:rh_ma}.
+% The role of \texttt{struct run} is representing existence of empty physical pages.
+% It is placed on a head of unused physical page and constructs an unused pages linear list (as mentioned Free List) by storing next node pointer.
+% When xv6 allocates a new memory page, it picks up a node from the free list, and passes the beginning address of page that the node managed.
+
+% \subsubsection{Surgery of Internal Structures}
+% \texttt{struct run} manages empty physical pages in xv6. It is placed on a head of unused physical page and constructs a unused pages linear list (as mentioned Free List) by having next \texttt{run} node pointer. When xv6 wants to allocate a new memory page, xv6 picks up a \texttt{run} node from free list, and passes the beginning address of the page which the node managed. In the \texttt{struct run} recostruction, recovery handler grasps next node of broken \texttt{run} node from A-List (see Sec.~\ref{subsec:alist}), then disposes broken node itself. Fig.~\ref{run_Recovery_Overview} shows overview of \texttt{struct run}'s reconstruction step. Address list of \texttt{struct run} stores all of beginning address of \texttt{run} nodes, and the order of A-List is managed to match the real order of free list. Therefore, recovery handler can recover free list by identifing previous/next node of broken node in free list by searching A-List and connecting previous and next nodes. Since the broken node contains ECC-uncorrectable error, simply disposing it prevents access to the error point.
+% In the \texttt{struct run} surgery, recovery handler grasps next node of broken one from A-List (see Sec.~\ref{subsec:alist}), and then disposes it.
+% Fig.~\ref{run_Recovery_Overview} shows overview of \texttt{struct run}'s recovery surgery.
+% Address list of \texttt{struct run} stores all of beginning address of \texttt{run} nodes, and the order of A-List is managed to match the real order of free list.
+% Therefore, recovery handler can recover free list by identifying previous/next node of broken node in the free list by searching A-List and connecting previous and next nodes.
+% Since the broken node contains ECC-uncorrectable errors, simply disposing it can prevent access to the error point.
+
+% \begin{figure}[t]
+%   \centering
+%   \includegraphics[width = 8.75cm]{./figures/run_Recovery_Overview.png}
+%   \caption{\texttt{struct run} Reconstruction Overview.\label{run_Recovery_Overview}}
+% \end{figure}
+
+% % When \texttt{struct run} node is broken, \texttt{struct file} and \texttt{struct proc} are checked inconsistencies in this step. In \texttt{struct file}, inconsistencies occurs when pipe command is tried to execute. Although \texttt{file} node doesn't need allocating empty page, \texttt{struct pipe} needs new memory page allocation in beginning of pipe command. Thus, \texttt{file} nodes which are tagets of the pipe command can be left if a NMI occures during allcation of a page to \texttt{pipe}. To handling this situation, if \texttt{pipealloc()} was called until the NMI, recovery handler searches \texttt{ftable} and frees \texttt{file} nodes which have \texttt{FD\_PIPE} flag. In \texttt{struct proc}, an inconsistency can occur when \texttt{allocproc()}, which allocates a new process, was called until a NMI. \texttt{allocproc()} needs a new page for \texttt{struct trapframe}, which stores contents of genral registers when a trap is issued. Recovery handler stops and initializes target \texttt{proc} node to avoid leaving \texttt{proc} node that was in the process of being allocated.
+% When \texttt{struct run} node is broken, \texttt{struct file} and \texttt{struct proc} need to be checked inconsistencies.
+% In \texttt{struct file}, inconsistencies occurs when pipe command is tried to execute.
+% Although \texttt{file} node doesn't need allocating empty pages, \texttt{struct pipe} needs a new page allocation in beginning of pipe command.
+% Thus, \texttt{file} nodes which are tagets of the pipe command can be left if a NMI occures during allcation of a page in \texttt{pipe}.
+% To handling this situation, if \textsf{pipealloc()} was called until the NMI, recovery handler searches \texttt{ftable} and frees \texttt{file} nodes which have \texttt{FD\_PIPE} flag.
+% In \texttt{struct proc}, an inconsistency can occur when \textsf{allocproc()}, which allocates a new process, was called until a NMI because it needs a new page for \texttt{struct trapframe}, which stores contents of genral registers when a trap is issued.
+% In this situcation, recovery handler initializes target \texttt{proc} node to avoid leaving the node that was in the process of being allocated.
+
+% \subsubsection{Exposure of the Error}
+% Even if under conservative mode, \texttt{struct run} doesn't have any case of failing stop.
+% However, the handler force to free all of allocated pages in the process of allocation by \emph{Process Kill} if \textsf{sbrk()} or \textsf{fork()} are called until NMI.
+
+
+\subsubsection{Console}
+\label{subsec:recoveryhandlerCons}
+We group the three objects in the console, \texttt{devsw} and \texttt{pr}, and the other one, \texttt{cons}, into the restoring and initialization group, respectively, as shown in Table~\ref{tbl:handle_overview}. For example, the \texttt{devsw}, which has the function pointers to implementation for read/write operations, the recovery handler allocates a new one and sets the function pointers same as the original in the internal-surgery. And then, it releases the corresponding locks and performs syscall fail.
+% In the console that has the three objects, we group the three objects, \texttt{devsw} and \texttt{pr}, and the other one, \texttt{cons}, into the restoring and initialization categories, respectively, as shown in Table~\ref{tbl:handle_overview}. For example, {\sysname} performs the syscall fail when the \texttt{devsw} is damaged. The \texttt{devsw} has the function pointers to implementation for read/write operations. In the internal-surgery phase, the recovery handler allocates a new \texttt{devsw} and sets the function pointers same as the original ones. And then, it just releases the corresponding \texttt{buf} and \texttt{inode} locks. In the after-treatment phase, the recovery handler simply returns error in the system call.
+
+% % There are three types of memory objects related to console module, and all of them are treated as recovery targets. % However, only \texttt{struct devsw} is instroduced and all objects recovery handling in concole are summarized in Table.~\ref{tbl:rh_co}. \texttt{struct devsw} holds funtion pointers which do read/write to special device (only console in xv6). In this way, xv6 can call read/write functions of special devices via \texttt{devsw} without direct knowledge of these read/write functions easily.
+% There are three types of memory objects related to console module, and all of them are treated as recovery targets.
+% However, only \texttt{struct devsw} is instroduced and all objects recovery handling in concole are summarized in Table.~\ref{tbl:rh_co}.
+% The \texttt{struct devsw} holds funtion pointers which do read/write to special devices (only console in xv6).
+% In this way, xv6 can easily call read/write functions of special devices via this object without direct knowledge of these functions.
+
+% \subsubsection{Surgery of Internal Structures}
+% % Reconstruction policy which \texttt{devsw} recovery handler empolys is to \texttt{Restore}. In xv6, we are able to know easily function pointers which \texttt{devsw} held, so we can reconstruct it by simply assigning these pointers to new \texttt{devsw}. In this step, \texttt{struct inode} and \texttt{struct buf} are targets of solving inconsistencies. Recovery handler releases sleeplocks which recovery process holds on to avoid dead lock because these objects have acquired their own sleeplocks in read/write.
+% In \emph{Restoring} surgery, recovery handler simply allocates new memory region for new \texttt{devsw} and assigns the same contents.
+% In xv6, we are able to know easily function pointers which \texttt{devsw} held, so we reconstruct it by simply assigning these pointers to new one.
+% \par In inconsistency checking, \texttt{struct inode} and \texttt{struct buf} are targets.
+% Recovery handler releases sleeplocks which recovery process holds on to avoid dead lock, because these objects have acquired their own sleeplocks in read/write.
+
+% \subsubsection{Exposure of the Error}
+% All cases of recovery finish by \emph{Syscall Fail}.
+
+
+
+\subsubsection{Locks}
+\label{subsec:recoveryhandlerLock}
+Xv6 offers typical two lock functionalities, \emph{spinlock} and \emph{sleeplock}, each of which has their own lock variable.
+Both of them are categorized in the restoring group.
+% Xv6 offers typical two lock functionalities, \emph{spinlock} and \emph{sleeplock}, each of which has their own lock variable. Both of them are categorized in the initializing group because it is difficult to collect enough information from other objects to restore. %and the recovery handlers are mainly used in other objects recovery.
+The recovery handler first allocates a new lock or reconstructs whole memory objects that have lock variables such as \texttt{kmem} and \texttt{cons}, and sets the lock status which should be used according to the kernel context in accessing the damaged lock variable. Specifically, the recovery handler judges as locked when the lock corruption occurred before release or after acquisition, and as unlocked after release, respectively.
+% The recovery handler first allocates a new lock or reconstructs whole memory objects that have lock variables such as \texttt{kmem} and \texttt{cons}, and sets the lock status to locked or unlocked. The recovery handler clearly judge which lock values should be used according to the kernel context in accessing the damaged lock variable when the lock corruption before releasing locks or after acquiring locks, and it is obvious that the damaged lock's status was locked. On the other hand, it is obvious that the damaged lock is unlocked after releasing it.
+% unlock の例
+
+
+% We explain recovery of two kinds of locks, \texttt{struct spinlock} and \texttt{struct sleeplock}, in xv6. We choose \emph{Initialize} basically in reconstructing these objects, but \emph{Restore} is chosen instead in some cases.
+% \par Spinlock is a form of locking that makes processes waiting for the lock to spin, so waiting processes don't pass CPU to other processes. Sleeplock is a form of locking that makes processes waiting for the lock to sleep, so waiting processes call \texttt{sleep()} and pass CPU to other processes. In this way, efficiency of CPU usage is improved by adopting sleeplock in exclusive controls which are expected long wait, such as disk I/O.
+% Xv6 has two kinds of locks, spinlock and sleeplock, and we choose \emph{Initializing} basically in reconstructing these objects, but \emph{Restoring} is chosen instead in some cases.
+% Spinlock is a form of locking that makes processes waiting for the lock to spin, so waiting processes don't pass CPU to other processes.
+% Sleeplock is a form of locking that makes processes waiting for the lock to sleep, so waiting processes pass CPU to others.
+% In this way, CPU usage is improved by adopting sleeplock in exclusive controls which are expected long wait, such as disk I/O.
+
+% \subsubsection{Surgery of Internal Structures}
+% % There are two patterns of reconstruction of locks depends on that the recovery handlers is called.  First case is the situation which NMI occurs due to ECC-uncorrectable error in accessing to locks, in other words, NMI occurs inside of functions that operate locks. In this case, recovery handler initializes as allocated new memory region for the broken lock as unlocked and decides whether the lock was locked or unlocked from function call history. Specifically, in the case of unlocking function \texttt{release()}, there are two patterns. As the first pattern, the lock status must be locking when the lock was touched in \texttt{release()} firstly, so we can initialize reconstructed lock as locking. On the contrary, the lock status must be unlocked when the lock was accessed in the last of \texttt{release()}, then we initialize it reconstructed one as unlocked.
+% % \par On the other hand, we cannot judge lock status in this way in \texttt{acquire()}, which acquires locks because the lock status can be both locking and unlocked before completing lock acquisition. Although we can sleep recovery process and make other processes in the critical section to get away from it in the single core system configure, we can't do this way in multi-core configuration because we use unique process state \texttt{RECOVERING}, which means the process is in recovery. The special status can avoid scheduling to avoid unintentional context switch during recovery, but the way has a problem that it is no longer scheduled when the process sleeps. Therefore, recovery handler initializes the recovering lock as unlocked even if \texttt{acquire()} was called so that prevents system stop due to dead lock.
+% % \par The second case is that memory objects which have lock as a member experiences a NMI cause of other member, in other words, a NMI occurs outside of lock operation functions. This case have a problem that it is hard to know the objects was locked or not. Since initialization as locking can cause a dead lock and recovey handler cannot resume operations in which NMI has occured, we handle this problem by initializing the lock as unlocked state. Furthermore, to best our knowledge, xv6 acquires a lock before manipulating the object and does not touch other objects while holding a lock on one object such as file and inode. For these reasons, recovery handler initializes broken objects lock as unlocked.
+% After allocation of new memory region for new lock, reconstructive surgery branches two cases depending on the location of NMI.
+% The first case is the situation which NMI occurs in accessing to locks, in other words, NMI occurs inside of lock operating functions.
+% In this case, recovery handler must decide whether to initialize the lock as locking or unlocked, which can be further divided into two patterns in release function.
+% In the first pattern, the lock status must be locking when the lock was touched in release function firstly, so we can initialize reconstructed lock as locking.
+% On the contrary, the lock status must be unlocked when the lock was accessed in the last of release function, then we initialize it reconstructed one as unlocked.
+% \par On the other hand, we cannot judge lock status in this way in lock acquiring function, because the lock status can be both locking and unlocked before completing lock acquisition.
+% Although we can sleep recovery process and make other processes in the critical section to get away from it in the single core system configure, we can't do this way in multi-core configuration because we use unique process state \texttt{RECOVERING}, which means the process is in recovery.
+% This special status can avoid scheduling to prevent unintentional context switch during recovery, but also has a problem that it is no longer scheduled when the process sleeps.
+% Therefore, recovery handler initializes the recovering lock as unlocked even if \textsf{acquire()} was called so that prevents system stop due to dead lock.
+% \par The second case is that memory objects which have a lock as a member experiences a NMI cause of other member, in other words, a NMI occurs outside of lock operating functions.
+% Since initialization as locking can cause a dead lock and recovey handler cannot resume operations in which NMI has occured, we handle a problem which that it is hard to know the objects was locked or not by initializing the lock as unlocked state.
+% Furthermore, to best our knowledge, xv6 acquires a lock before manipulating the object and does not touch other objects while holding a lock on one object such as file and inode.
+% For these reasons, recovery handler initializes broken objects lock as unlocked in this case.
+
+
+
+% \subsection{Page Tables Replication}
+% \label{subsec:pagetablereplication}
+% Page table recovery requires both necessary and sufficient address mapping information replicating and less memory space overhead at the same time.
+% From recovery viewpoint, page tables are essential to make the system to keep running of course and also it is difficult to extract enough information to restore from other objects.
+% Therefore, page tables replication is essential to make them recoverable, but naive replicating causes too large memory space overhead because it occupies the same amount of page tables as per process additional memory space.
+% In Sv39 used in xv6 (RISC-V) that is the case study in this work, 39 bits of 64 bits address length is used as the offset for three-layer page tables \cite{RISC-VManualVol2}, which means that each process can use up to 1 GiB memory space.
+% Even in x86 architecture, x86 (64-bit mode) in Linux consumes memory regions up to about 513 GiB per process.
+% \par To tackle this challenge of huge memory space overhead, we introduce \emph{Page Table Duplication (PTDUP)}, which switches the way of replication of page tables among the different layers and manages all page table replicas together.
+% PTDUP copies the whole of mapping in L2 and L1 page tables (correspond to PUD and PMD in Linux) as replicas because they occupy relatively low memory spaces.
+% In contrast, it compresses the amount of mapping information of L0 page table (corresponds to PTE in Linux) by introducing a new approach, called \emph{Page Table Direct Segmernt (PTDS)}, since L0 page tables are the most memory-dominant layer in memory-intensive situation.
+% We explain PTDUP and PTDS details through duplicatoin of L2 and L1 page tables and replication of L0 page tables, respectively.
+
+% \subsubsection{\emph{Page Table Duplication (PTDUP)}}
+% \emph{PTDUP} is a mechanism to manage pagetable replications efficiently and effectively.
+% PTDUP associates an original data structure (\texttt{struct ptdup\_head}) and stores pointers to each page table replica.
+% As mentioned abobe, PTDUP simply duplicates L2 and L1 page tables mapping contents.
+% The L2 page tables are duplicated in creating page tables in process allocaton, and L1 page tables are duplicated at creation of it.
+% Of course, since the page tables are updated from time to time, PTDUP tracks and reflects the updates to replicas for keeping up-to-date.
+
+% \subsubsection{\emph{Page Table Direct Segmernt (PTDS)}}
+% PTDS is a compression mechanism of L0 page tables mapping information contents, which occupy a large part of memory usage in page table, without minimum mapping information loss.
+% Fig.~\ref{PTDS_PTED_Mechanism} shows the contrivance of compression by PTDS.
+% This method is inspired by the concept of \emph{Direct Segment}\cite{Basu2010}, and this method represents multiple PTEs as a single entry when both virtual address and physical address are contiguous across multitle entries.
+% On the other hand, uncontiguous PTEs are duplicated as they are by \emph{Page Table Entry Duplication (PTED)} mechanism.
+% By combining these methods, the size of a duplication of recoverable L0 page tables can be compressed by up to about 94 \% (the worst case is the same as the size of a L0 page table, see Sec.~\ref{subsubsec:memoverhead}).
+% \par In the making PTDS, we only record \texttt{User} bit in PTE's flags because basically \texttt{Executable, Writable, Readable} and \texttt{Valid} bits are set in user's page tables and \texttt{Global} bit is set when the PTE is exhibited to all other page tables such as \texttt{TRAPFRAME} or \texttt{TRAMPOLINE}.
+% \texttt{Dirty} and \texttt{Access} bits are considered that they don't affect for making the system surviving when they lost, so we decided not to record them to PTDS (however, it does not mean that there is no affection to the system. For example, changed point can be lost if \texttt{Dirty} bit is changed from 1 to 0 because of recovery).
+
+% \begin{figure}[t]
+%   \centering
+%   \includegraphics[width = 8.5cm]{./figures/PTDS_PTED_mechanism.png}
+%   \caption{\emph{PTDS} and \emph{PTED} mechanism.\label{PTDS_PTED_Mechanism}}
+% \end{figure}
+
+
+
+% \subsection{Page Table Recovery Handler}
+% \label{subsec:recoveryhandlerpagetable}
+% % The page table recovery handler do recovery by layer in \emph{Restoring} policy by using \emph{PTDUP, PTDS} and \emph{PTED}. Although the detailed methods are different by layer, all layers share some common operations.
+% % \textbf{\emph{Reconstruct}} \indent As a preprocessing of \emph{Reconstruct}, recovery handler has to identify which page table is broken due to ECC-uncorrectable error.  Specifically, recovery handler comprehends which layer and processes's page table is broken and gains the beginning address of it by using A-List. Then, recovery handler distinguishs which PTDUP should be used from process ID (\texttt{pid}) and comprehended layer. After that, reconstruction opration branches off to layer-by-layer operaions.
+% % \textbf{\emph{Solve Inconsistencies}} \indent Before finishing recovery, recovery handler has to release locks which recovery process holds on because some locks can be left with holding depending on when the NMI occurs and causes dead lock after recovery. In addition to this, if a NMI occuers during log write, recovey operaions can be finished without log writing correctly, and kernel panic due to oversizing \texttt{logheader} can be issued. Thus, recovery handler writes log contents to the disk before completing recovery.
+% % \textbf{\emph{Determine Termination}} \indent Although recovery operaion is finished by \emph{Syscall Fail} basically, \emph{Process Kill} is used in the case of \texttt{exit()} was called or any functions in address area from \texttt{kvminit()} to \texttt{copyintr()}.
+
+% % \subsubsection{L2 Page Table}
+% % \textbf{\emph{Reconstruct}} \indent In L2 page table recovery, the handler copies replica of PTDUP L2 page table to an allocated memory page and fixes the pointer to L2 page table in corresponding \texttt{struct proc}. Then, recovery handler registers new L2 page table to A-List and deletes broken L2 page table from A-List.
+% %\textbf{\emph{Solve Inconsistencies}} \indent There is no need to fix other layer page tables to maintain consistency in L2 page table recovery.
+
+% % \subsubsection{L1 Page Table}
+% % \textbf{\emph{Reconstruct}} \indent In L1 page table recovery, same as L2, the handler copies complite replica of PTDUP L1 page table to an allocated page, registers new to A-List and deletes old from it.
+
+% % \textbf{\emph{Solve Inconsistencies}} \indent L1 page table recovery has to solve inconsistency between the upper layer tables, or the real and replica L2 page table. The real one and replica holds on old entry of L1 page table, so it is possible to keep consistency by rewriting them to new ones.
+
+% % \subsubsection{L0 Page Table}
+% % \textbf{\emph{Reconstruct}} \indent Recovery handler of L0 page table needs to restore mapping infomation from PTDS and PTED. Restoring mapping information from PTDS is achieved by reconstructing each entry from \texttt{PPN} and \texttt{User} bit which is kept in the PTDS entry and supplementing \texttt{XRWN} flags, and recompressing the compressed entries. In addition to that, uncontiguous entries are restored by copying PTEDs. At last, as same as other layers, recovery handler adds new L0 page table node to A-List and removes old one from it.
+% % \textbf{\emph{Solve Inconsistencies}} \indent % In the L0 page table solving inconsistencies phase, upper layer, or both of the real and replica L1 page tables are overwrited correctly like in the case of L1 corruption.
+% The page table recovery handler do recovery by layer in \emph{Restoring} policy by using \emph{PTDUP, PTDS} and \emph{PTED}.
+% Although the detailed methods are different by layer, all layers share some common operations.
+
+% \subsubsection{Surgery of Internal Structures}
+% As a preprocessing of reconstructive surgery, recovery handler has to identify which page table is broken due to ECC-uncorrectable errors.
+% Specifically, recovery handler comprehends which layer and processes's page table is broken, gains the beginning address by A-List and distinguishs which PTDUP should be used from process ID.
+% \par While the basic surgery policy is the same for \emph{Restoring}, the restoration opration details differ between L2 and L1 layers and L0 layer after allocating a new page.
+% Specifically, L2 and L1 page tables are restored by simply copying mapping information from replica, but L0 page tables need to be reconstruct restoring mapping infomation from PTDS and PTED replicas.
+% Restoration mapping information from PTDS is achieved by reconstructing each entry from PPN, User bit which are kept in the PTDS entry and supplementing \texttt{XRWV} flags, and decompressing the compressed entries.
+% In addition to that, uncontiguous entries are restored by copying PTEDs.
+
+% \par Before finishing recovery, recovery handler has to solve inconsistencies not only among other types of objects, but also different layer page tables.
+% To solve inconsistencies between upper layer, the handler has to update upper table's mapping when L1 and L0 page table recovery.
+% In L2 page table recovery, \texttt{struct proc}'s member \texttt{pagetable} stores current page table pointer, so it need to be update from old to new.
+% In addition to that, recovery handler also has to release locks which recovery process holds on because some locks can be left with holding depending on when the NMI occurs and causes dead lock after recovery.
+% If a NMI occuers during log write, recovey operaions can be finished without log writing correctly, and kernel panic due to oversizing \texttt{logheader} can be issued.
+% Thus, recovery handler writes log contents to the disk before completing recovery.
+
+% \subsubsection{Exposure of the Error}
+% Although recovery operaion is finished by \emph{Syscall Fail} basically, \emph{Process Kill} is used in the case of \textsf{exit()} was called or any functions in address area from \textsf{kvminit()} to \textsf{copyintr()}.
+
+
+
+\subsection{\Alist}
+\label{subsec:alist}
+% To identify damaged memory objects and invoke appropriate recovery handlers, we prepare \emph{\alist} that associates virtual addresses with the types of memory objects and their recovery handlers. When a memory region damaged by an ECC-uncorrectable error is accessed, the ECC module notifies {\sysname} of the accessed virtual address via an NMI\@. The NMI handler of {\sysname} then tracks {\alist} to identify the type of the damaged memory object and invokes its recovery handler. For example, a memory object of \texttt{struct buf} is damaged and {\sysname} accesses its corrupted part. {\sysname} uses the corrupted virtual address as a key to search the damaged memory object type from {\alist}. After identifying the type, {\sysname} invokes the corresponding recovery handler to restoration, as described in the above section.
+To identify damaged memory objects and invoke appropriate recovery handlers, we use the \emph{\alist}, which associates virtual addresses with the types of memory objects and their recovery handlers. When a memory region damaged by an ECC-uncorrectable error is accessed, the ECC module notifies {\sysname} of the accessed physical address via an NMI\@. The NMI handler of {\sysname} then tracks the {\alist} to identify the type of the damaged object and invokes its recovery handler. For example, suppose that a memory object of \texttt{buf} is damaged and {\sysname} accesses its corrupted part. {\sysname} uses the corrupted virtual address as a key to search the damaged object type in the {\alist}. After identifying the type, it invokes the corresponding recovery handler, as described in the above section.
+
+{\sysname} monitors operations for allocating and freeing memory objects to maintain the {\alist}. Specifically, it registers the virtual address to the corresponding object type list in the {\alist} during allocation and it unregisters them during releasing. Static objects such as \texttt{kmem} and \texttt{cons} are also registered in the {\alist} at boot time. Finally, {\sysname} registers free list metadata, namely \texttt{run}, in the memory initialization phase while unregistering the corresponding \texttt{run} in the page allocation.
+%{\sysname} monitors operations for allocating and freeing memory objects to maintain the {\alist}. Specifically, it registers the virtual address and memory object type in the {\alist} during allocation, and it unregisters them when the memory object is released. Static objects such as \texttt{kmem} and \texttt{cons} are also registered in the {\alist} at boot time. Finally, {\sysname} registers free list metadata, namely \texttt{run}, in the memory initialization phase while unregistering the corresponding \texttt{run} in the page allocation.
+
+%% For identification of the broken memory objects due to ECC-uncorrectable errors from detected address from ECC memory, we introduce a new mechanism called \emph{A-List}, which records the beginning addresses of all memory objects designated as recovery targets.
+%% As described in Sec.~\ref{subsec:faultmodel}, there is a challenge of identification which memory objects include the detected address which ECC memory passed to OS as ECC-uncorrectable error occuring physical address.
+%% To handle this challenge, we design A-List for resolving correspondence between memory objects and passed address from ECC memory.
+%% When NMIs due to ECC-uncorrectable errors occurs, OS consults the A-List, identifies which objects are broken and calls appropriate per-object recovery handler to start recovery operations.
+%% In subsequent sentences in this chapter, we will explain A-List structure and A-List searching function called \texttt{mediator()}.
+
+%% \subsubsection{A-List Structure}
+%% A-List manages each the beginning address of recovery target objects in form of a beaded singly-linked list for each kinds of them.
+%% The overall A-List header stores pointers to all address list header node, so each address list is accessed through it.
+
+%% \subsubsection{Register to/Delete from A-List}
+%% To identify the broken objects through A-List correctly, A-List has to reflect allocation status of all of recovery targets precisely.
+%% To achieve this requirement, it is needed to register and delete of beginning address in the A-List in the time of creation and deletion recovery targets, respectively.
+%% Therefore, we implement a special data structure called \texttt{struct addr\_list}, and register the beginning addresses of target objects at the timnmg of creation and initialization of memory objects after system boot.
+%% If the object creation proceeds than A-List construction, then we add its address to A-List after A-List setup.
+%% Similarly, we remove recorded address at the timing of object deallcation, and prevent wrong recovery against not existing objects.
+
+%% \subsubsection{\texttt{mediator()}}
+%% For calling appropriate recovery handler corresponding broken object, a function which actually searches A-List and calls recovery handlers is needed.
+%% This is because A-List covers all recovery targets by ifself, while recovery handlers exist one for each recovery target.
+%% Thus, it should not call recovery handlers directly at the point of corruption detected, should call them after identification of broken memory object kind.
+%% \par When \texttt{mediator()} is passed detected address from NMI handler, it searches A-List of each memory object in turn and call appropriate recovery handler if it finds out a objects includes broken address.
+%% If there is no objects which includes broken address after searching A-List, it concluds that the memory error occuers out of scope which our approach covers and stop the system by kernel panic.
+%% In addition to identification, \texttt{mediator()} also do relevant settlements after comimg back from recovery handlers, such as registration recovered address to recovered list, updating NMI Queue, and so on.
+%% After handling all NMIs, it finishes recovery operations by specified termination way, as mentioned in Sec.~\ref{subsubsec:exposure}.
+
+
+\subsection{NMI Shepherd}
+\label{subsec:nmishepherd}
+% main は複数の NMI のシリアライズで，それによる NMI loop を回避するために stack 上に置くという工夫をしている．
+ECC-uncorrectable errors can damage multiple memory objects of the five components as well as our recovery mechanisms, which we should deal with carefully. Such errors can cause an NMI for ECC-uncorrectable errors during recovery of memory objects, entering multiple processes to recovery handlers in parallel in different cores and overriding the preempted recovery by follows.
+The NMI continues to occur in the handler or other cores because of accessing damaged memory regions, and the NMI handler is called recursively. For example, during recovery \texttt{log}, another process touches it by entering the log transaction.
+
+% ECC-uncorrectable errors can damage multiple memory objects of the five components as well as our recovery mechanisms, which we should deal with carefully. Such errors can cause an NMI for ECC-uncorrectable errors during recovery of memory objects, and the NMI handler can enter an infinite loop, causing the OS kernel to hang. The NMI continues to occur in the handler because of access to damaged memory regions, and the NMI handler is called recursively. For example, the recovery handler causes an NMI when a recovery mechanisms such as the {\alist} is damaged. Another example occurs when memory objects used for restoring a damaged memory object are corrupted. XXXXXX.
+
+To address this issue, we use \emph{bounded {\nmiq}} that enforces users to coordinate the serial NMI handling in multi-core mahines. In this {\nmiq}, the NMI handler pushes recovery requests into a bounded queue. When an NMI occurs during the recovery of a damaged memory object, the NMI handler enqueues the recovery request and moves the context to the preempted recovery handler to serialize multiple NMIs.
+If the queue is full or NMIs occur in the same recovery process, our mechanism invokes \textsf{panic()} to force {\sysname} to fail-stop. For example, many cores enter the log transaction, or the recovery handler causes an NMI when our mechanisms are damaged by ECC-uncorrectable errors such as the {\alist}.
+% Another example occurs when objects used for restoring a damaged object are corrupted, such as corruption of a L1 during its lower L0 recovery.
+% In the case of NMI in the same recovering process, {\sysname} perfroms fail-stop to avoid internal-surgery overriding.
+%To address this issue, we use \emph{bounded {\nmiq}} that enforces users to perform reboot-based recovery. In this {\nmiq}, the NMI handler pushes recovery requests into a bounded queue. When an NMI occurs during the recovery of a damaged memory object, the NMI handler enqueues the recovery request and moves the context to the preempted recovery handler. If the queue is full, our mechanism invokes \textsf{panic()} to force {\sysname} to fail-stop. For example, many cores issues system calls and try to enter the log transaction. {\sysname} places a guard page at the top of the queue and a protection fault occurs when the queue is filled up with recovery requests.
+% To address this issue, we use \emph{bounded {\nmiq}} that enforces users to perform reboot-based recovery. In this {\nmiq}, the NMI handler pushes recovery requests into a bounded queue. When an NMI occurs during the recovery of a damaged memory object, the NMI handler enqueues the recovery request and moves the context to the preempted recovery handler. If the queue is full, our mechanism invokes \textsf{panic()} to force {\sysname} to fail-stop. For example, XXXXXXX. {\sysname} places a guard page at the top of the queue and a protection fault occurs when the queue is filled up with recovery requests.
+
+Our recovery mechanism also pays careful attention to ECC-uncorrectable errors that affect the safe behavior of the {\nmiq} described above. When the text code for queuing recovery requests is corrupted by an ECC-uncorrectable error, the NMI handler goes into an infinite loop in which our mechanism tries to push the recovery request and an NMI occur because of the repeated access to the damaged text code.
+
+To avoid this situation, {\sysname} implements the queue in a process kernel stack and places a guard page at the top of the queue to trigger protection fault when the intinite loop occurs.
+When the text region for {\nmiq} is damaged, the loop of recursively calling the NMI handler occurs but the guard page for the stack overflow in the kernel stack detects this loop and then {\sysname} ultimately fail-stops.
+% To avoid this situation, {\sysname} implements the queue in a process kernel stack. When the kernel context of a process faces an ECC-uncorrectable error, the recovery mechanism pushes recovery requests onto its kernel stack, which serves as the NMI queue. When the text region for {\nmiq} is damaged, the loop of recursively calling the NMI handler occurs but the guard page for the stack overflow in the kernel stack detects this loop and then {\sysname} ultimately fail-stops.
+
+% {\sysname} coordinates the parallel execution of recovery handlers on multi-core machines. Because multiple processes are running and access the damaged memory objects simultaneously, the recovery handlers are executed on different cores. Without any control of their execution, the recovery handlers perform surgery on the internal structures in parallel. To avoid memory object corruption due to the parallel surgery, the recovery handlers acquire memory object's locks, like the regular kernel contexts, if necessary. %The parallel invocation of recovery handlers can also create NMI queues in different process's kernel stacks, causing the recovery handler to fetch the next recovery request.
+
+%% NMIs due to same/different memory errors are possible to occuer in the same process or among diferente processes with very close timing in multi-core platform. Although, we can prevent to touch error point by other processes by allowing not to context switching during recovery in single-core platform, we cannot prevent it by same way in multi-core environment since programs are executed in parallel.
+%% If contiguous multiple NMIs occuer among processes, some inconsistencies can be occuer because multiple recovery handlers run in parallel and create multiple same kind of memory objects in worst case.
+
+%% To handle this challenge, we design \emph{NMI Queuing mechanism}, which serializes multiple NMIs by queuing them for handling them sequentially. We explain the details of NMI Queuing mechanism through describing operation flow from calling NMI Queue handler to finishing recovery by \textsf{mediator()}.
+
+%% \subsubsection{NMI Queue Mechanism}
+%% Basic policy of NMI Queuing is that following NMI occured processes enqueue information and wait recovery finish in the first recovery process with polling.
+%% In this way, even if NMIs overlap, only one process is required to perform recovery and multiple NMIs can be handled in a sequence.
+%% Information which following processes queue are detected address, process ID (pid), \texttt{sp} register (stack pointer) and \texttt{s0} register contents.
+%% The pid is used to identify which process's NMI is finished recovery and to discriminate whether recovery process or not in recovery handlers.
+%% \texttt{sp} and \texttt{s0} registers are needed when a recovery handler wants to see function call history.
+%% \par NMI Queue is allocated on kernel stack of the first recovery process (a process experienced first NMI).
+%% There are two reasons to allocate it on the kernel stack, not on the heap segment.
+%% The first reason is to handling NMI loop due to detect other memory errors while error handling.
+%% Even if we take measures against NMI on NMI (NMI on the same process, see below), infinite loop that recovery process continues to touch the memory error point to handle NMI, depending on the kinds of damaged memory objects.
+%% However, the infinite loop can be stopped by placing NMI queue on the kernel stack because the process continues to push to its stack due to NMI loop and invades a guard page, then segmentation fault occurs and the system force to be stopped.
+%% The second reason is to avoid another memory error of \texttt{struct run} or \texttt{struct kmem} due to accessing corrupted cell in the new page allocation.
+%% This is because the recovery of \texttt{struct kmem} and \texttt{run} are much easier than stack area recovery, so we judged that we must not lower the recoverablity by not preparing NMI Queue.
+
+%% \begin{figure}[t]
+%%   \centering
+%%   \includegraphics[width = 8.5cm]{./figures/NMI_Queue_Handling_Overview.png}
+%%   \caption{\emph{NMI Queue} handling overview.\label{NMI_Queue_Handling_Overview}}
+%% \end{figure}
+
+%% \subsubsection{NMI Queue Handler}
+%% The NMI Queue handler switches operations depending on whether the process which entered the handler experiences the first NMI or following NMI.
+%% Fig.~\ref{NMI_Queue_Handling_Overview} shows handling multiple NMIs overview by using NMI Queuing mechanism.
+%% The process which experienced first NMI makes NMI queue on its own kernel stack and enqueues information to it.
+%% In contrast, following processes enqueue NMI information and do polling to wait for the first recovery process to complete their own NMIs.
+%% When the first recovery process finishes reocovery operation of corruption a following process, contents of NMI queue is updated by the first process.
+%% The following process exits from polling, and ends recovery operation by designated way directly after some settlements such as dequeuing its own information from NMI queue.
+
+%% \subsubsection{Unrecoverable Contiguous NMIs}
+%% Even if NMI Queue is applied, some unrecoverable cases remains in multi-core environment.
+%% For example, multiple NMIs occured in same process cause inconsistencies such as multiple objects creation, discontinuation of recovery operatons and so on because preceding recovery operation can be overrided by following operations.
+%% In another examples, entering multiple processes to NMI handler by accident, or of course NMIs occurs in our mechanisms like A-List, NMI Queue, recovery handler, etc.
+%% \par As a counterpart to these corner case, we switch functions to be called by operation progress.
+%% In the beginning of NMI handler, first NMI process changes next calling NMI handle function pointer to \textsf{panic()} atomically, and changes the function pointer to NMI queue handler function immediately before entering NMI queue handler.
+%% Similarly, recovery process changes next calling recovery operate function pointer to \textsf{panic()} while the first process is in recovery operations, we can prevent to doubly call \textsf{mediator()} and recovery handlers.
