@@ -1,5 +1,7 @@
 \section{提案} \label{section:proposal}
 
+\subsection{全体像}
+
 本論では，Unikernel の \rr を効率的に行う \emph{VampOS}を紹介する．
 VampOS の設計目標は以下のとおりです．
 
@@ -44,3 +46,20 @@ Unikernel を若返りのために，Unikernel がリンクしたアプリケー
 次の章では，これらの課題に対する解決策を述べる．
 以下の議論は Unikraft~\cite{KuenzerEtAl-Unikraft} 上のプロトタイプの開発に基づくものであるが，
 IncludeOS~\cite{BratterudEtAl-IncludeOS} のような他の Unikernel にも十分に適用できる一般性を持つであろう．
+
+
+\subsection{フォールトモデル}
+
+\sysname の目標は，
+\rr による Unikernel のソフトウェア老化に関連するバグの影響を軽減することである．
+そのソフトウェアバグは，
+解放忘れのメモリオブジェクトや閉じ忘れたディスクリプタなどの古くなったり漏れたりしているリソースであり，
+アプリケーションの性能を低下させるだけでなく，クラッシュやハングアップが発生することもある．
+
+コンポーネント間のエラー伝搬は
+防ぐべき対象である．
+
+Unikernel のコンポーネント単位で若返りさせることであり，
+
+ここでは，
+攻撃は考えない．
