@@ -14,7 +14,7 @@ VampOS の設計目標は以下のとおりです．
 \begin{figure}[t]
     \begin{center}
       \includegraphics[scale=0.3]{./img/vampos.eps}
-      \caption{\textbf{{\sysname} の全体像.} \textit{{\sysname} はコンポーネント単位での Unikernel の若返りを可能にする．そのために，\sysname は，各コンポーネントにより明確に定義され，公開されている関数をフックし，若返らせたコンポーネントの動作状態を復元するために関数呼び出しを記録する．}}
+      \caption{{\sysname} の全体像} 
       \label{fig:overview}
     \end{center}
 \end{figure}
@@ -32,6 +32,21 @@ Unikernel は多数のコンポーネントを提供し，
 例えば，ファイルシステムの若返りにおいては，\sysname は，
 他のコンポーネントの動作状態の変更しないように，
 そのコンポーネントのみを再起動し，若返りしたコンポーネント内部でログを再生する．
+
+ソフトウェア
+\sysname のコンポーネント単位での再起動は，
+
+
+慢性化することになる
+
+
+% The window-based interaction between components requires effi-
+% cient fine-grained control over page permissions. We propose to use
+% Intel’s Memory Protection Keys (MPK) [25], an ISA extension that
+% manages access permissions on groups of pages. It was first intro-
+% duced in Intel’s Skylake architecture, and it is similar to protection
+% keys in Itanium [24] and access identifiers in PA-RISC [23].
+
 
 \sysname の目標は，\rr の効果を得ることであり，通常の再起動との完全な互換を目指しているものではない．
 Unikernel を若返りのために，Unikernel がリンクしたアプリケーションの再起動の代わりに \sysname の再起動することができる．
