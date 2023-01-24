@@ -118,7 +118,7 @@ Microreboot~\cite{CandeaEtAl-Microreboot}は，
 Microreboot を可能にするために，
 対象のアプリケーションは，
 再起動の単位となる独立した小さいソフトウェアコンポーネントに分割される．
-小さいコンポーネントの再起動がフォールトから回復できない場合には，
+小さいコンポーネントの再起動がフォルトから回復できない場合には，
 より大きいコンポーネントが再起動される．
 このアプローチの暗黙の仮定として，
 Microreboot される各コンポーネントは状態を持たないので，
@@ -142,14 +142,15 @@ Unikraftt~\cite{KuenzerEtAl-Unikraft}は，
 Unikernel のモジュラリティを高め，
 TCB をできるだけ小さくすることによってカスタマイズ性と信頼性を向上させている．
 CubicleOS~\cite{SartakovEtAl-ASPLOS21}と FlexOS~\cite{LefeuvreEtAl-FlexOS}は，
-フォールトしたコンポーネントから他のコンポーネントへのエラー伝搬を防ぐために
+フォルトしたコンポーネントから他のコンポーネントへのエラー伝搬を防ぐために
 Unikernel のコンポーネント同士を強く分離するものである．
 これらのアプローチは，
 アプリケーションのコンポーネントやサードパーティ製のライブラリなどからの
 悪意のある攻撃から Unikernel の機密性と完全性を保護することを目的とするものである．
-これらのアプローチでは，Unikernel が経年劣化に関連したバグに悩まされることがないことを保証できないため，
+これらのアプローチでは，Unikernel が経年劣化に関連したバグに悩まされることがないことを保証できないのに対し，
 私たちのアプローチでは Unikernel を \rr することでその悪影響を軽減することができる．
-
+また，私たちの研究は Unikernel の \rr をテーマとしており，
+Unikernel への攻撃を想定するものではない．
 
 % A. Unikernels
 % The unikernel is linked to the target applications and

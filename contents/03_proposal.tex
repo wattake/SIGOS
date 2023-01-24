@@ -1,6 +1,6 @@
-\section{提案} \label{section:proposal}
+\section{提案} \label{sec:proposal}
 
-\subsection{全体像}
+\subsection{概要}
 
 本論では，Unikernel の \rr を効率的に行う \emph{VampOS}を紹介する．
 VampOS の設計目標は以下のとおりです．
@@ -14,7 +14,7 @@ VampOS の設計目標は以下のとおりです．
 \begin{figure}[t]
     \begin{center}
       \includegraphics[scale=0.3]{./img/vampos.eps}
-      \caption{{\sysname} の全体像} 
+      \caption{{\sysname} の概要} 
       \label{fig:overview}
     \end{center}
 \end{figure}
@@ -23,7 +23,7 @@ VampOS の設計目標は以下のとおりです．
 Unikernel は多数のコンポーネントを提供し，
 コンポーネント間のインタフェースが明確に定義されているため，
 アプリケーションの動作に必要なコンポーネントのみを選択することができる．
-\sysname の全体像を図\ref{fig:overview}に示す．
+\sysname の概要を図\ref{fig:overview}に示す．
 \sysname はコンポーネント単位での Unikernel の若返りを可能にし，
 リンクしたアプリケーションを継続して実行できるように，
 若返りしたコンポーネントの動作状態を復元する．
@@ -33,12 +33,15 @@ Unikernel は多数のコンポーネントを提供し，
 他のコンポーネントの動作状態の変更しないように，
 そのコンポーネントのみを再起動し，若返りしたコンポーネント内部でログを再生する．
 
-ソフトウェア
-\sysname のコンポーネント単位での再起動は，
-
-
-慢性化することになる
-
+また，\sysname では，\rr による Unikernel の若返りの効果を最大化するために，
+コンポーネント間のエラー伝搬を防止する．
+コンポーネントのフォルトが別のコンポーネントへと伝搬することで，
+複数のコンポーネントでフォルト発生するが，
+コンポーネント単位での再起動では，
+一度に一つのコンポーネントのエラー状態しか解消することができない．
+そのような場合，
+Unikernel 全体を安定化させるためには，
+フォルト状態にあるコンポーネントすべての若返りが必要になってしまう．
 
 % The window-based interaction between components requires effi-
 % cient fine-grained control over page permissions. We propose to use
@@ -61,20 +64,3 @@ Unikernel を若返りのために，Unikernel がリンクしたアプリケー
 次の章では，これらの課題に対する解決策を述べる．
 以下の議論は Unikraft~\cite{KuenzerEtAl-Unikraft} 上のプロトタイプの開発に基づくものであるが，
 IncludeOS~\cite{BratterudEtAl-IncludeOS} のような他の Unikernel にも十分に適用できる一般性を持つであろう．
-
-
-\subsection{フォールトモデル}
-
-\sysname の目標は，
-\rr による Unikernel のソフトウェア老化に関連するバグの影響を軽減することである．
-そのソフトウェアバグは，
-解放忘れのメモリオブジェクトや閉じ忘れたディスクリプタなどの古くなったり漏れたりしているリソースであり，
-アプリケーションの性能を低下させるだけでなく，クラッシュやハングアップが発生することもある．
-
-コンポーネント間のエラー伝搬は
-防ぐべき対象である．
-
-Unikernel のコンポーネント単位で若返りさせることであり，
-
-ここでは，
-攻撃は考えない．
