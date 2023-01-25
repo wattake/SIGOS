@@ -2,8 +2,8 @@
 
 \subsection{概要}
 
-本論では，Unikernel の \rr を効率的に行う \emph{VampOS}を紹介する．
-VampOS の設計目標は以下のとおりです．
+本論文では，Unikernel の \rr を効率的に行う \emph{VampOS}を紹介する．
+VampOS の設計目標は以下のとおりである．
 
 \begin{itemize}
     \item \textbf{Unikernel レイヤのみの Reboot-based Recovery．}{\sysname は，従来の Unikernel の再起動とは異なり，アプリケーションのメモリの内容を保持したまま Unikernel のメモリを若返らせる．アプリケーションは，私たちの Unikernel の再起動に渡って，継続して動作することができる．}
@@ -36,31 +36,25 @@ Unikernel は多数のコンポーネントを提供し，
 また，\sysname では，\rr による Unikernel の若返りの効果を最大化するために，
 コンポーネント間のエラー伝搬を防止する．
 コンポーネントのフォルトが別のコンポーネントへと伝搬することで，
-複数のコンポーネントでフォルト発生するが，
+複数のコンポーネントで連鎖的にフォルトが発生してしまうが，
 コンポーネント単位での再起動では，
 一度に一つのコンポーネントのエラー状態しか解消することができない．
 そのような場合，
 Unikernel 全体を安定化させるためには，
-フォルト状態にあるコンポーネントすべての若返りが必要になってしまう．
+フォルト状態にあるコンポーネントすべての若返りの完了を待つ必要があり，
+エラー状態が慢性化する可能性がある．
 
-% The window-based interaction between components requires effi-
-% cient fine-grained control over page permissions. We propose to use
-% Intel’s Memory Protection Keys (MPK) [25], an ISA extension that
-% manages access permissions on groups of pages. It was first intro-
-% duced in Intel’s Skylake architecture, and it is similar to protection
-% keys in Itanium [24] and access identifiers in PA-RISC [23].
-
-
-\sysname の目標は，\rr の効果を得ることであり，通常の再起動との完全な互換を目指しているものではない．
-Unikernel を若返りのために，Unikernel がリンクしたアプリケーションの再起動の代わりに \sysname の再起動することができる．
+\sysname の目標は，\rr の効果を得ることであり，通常の再起動との完全な互換を目指しているわけではない．
+Unikernel がリンクしたアプリケーションの再起動して Unikernel を若返らせるのではなく，
+代わりに \sysname の再起動を実行すればよい．
 \sysname のメカニズムは，
 通常の再起動によるソフトウェアアップデートや再構成のような他の目的に適用するものではなく，
-そのような目的のためには，通常の再起動が使われる．
+そのような目的のためには通常の再起動が使われる．
 
 \sysname の設計は以下の技術的な課題を提示する．
-どのように，Unikernel をコンポーネント単位で若返らせるのか?
-どのように，対象のコンポーネントのみを復元するのか?
-どのように，若返りしたコンポーネントの状態を効率良く復元するのか?
+(1)どのように，Unikernel をコンポーネント単位で若返らせるのか?
+(2)どのように，対象のコンポーネントのみを復元するのか?
+(3)どのように，若返りしたコンポーネントの状態を効率良く復元するのか?
 次の章では，これらの課題に対する解決策を述べる．
 以下の議論は Unikraft~\cite{KuenzerEtAl-Unikraft} 上のプロトタイプの開発に基づくものであるが，
 IncludeOS~\cite{BratterudEtAl-IncludeOS} のような他の Unikernel にも十分に適用できる一般性を持つであろう．
