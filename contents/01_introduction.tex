@@ -1,65 +1,59 @@
 \section{はじめに} \label{sec:introduction}
 
 \rr は，ソフトウェアをフォルトや不安定な状態からリカバリするためのシンプルかつ強力な方法であり，
-アプリケーションを再起動することで，その実行状態をリフレッシュする．
-定期的なアプリケーションの再起動は，\emph{ソフトウェア若化}~\cite{HuangEtAl-rejuvenation,CotroneoEtAl-rejuvenation-survey,CotroneoEtAl-Surv14}と呼ばれ，
-解放忘れのメモリオブジェクトや閉じ忘れのディスクリプタなどの古くなったり，漏れたりしているリソースを回収することで，
-アプリケーションの性能低下やクラッシュ，ハングアップを未然に防ぐことができる．
-ソフトウェア若化は，フォルトの根本的な原因を解析することなしにフォルトからリカバリすることができるうえ，
+ソフトウェアを再起動することで，その実行状態を若返らせる．
+定期的なアプリケーションの再起動は，ソフトウェア若化~\cite{HuangEtAl-rejuvenation,CotroneoEtAl-rejuvenation-survey,CotroneoEtAl-Surv14}と呼ばれ，
+解放忘れのメモリオブジェクトや閉じ忘れのディスクリプタなどのリソースを回収することで，
+ソフトウェアの性能低下やクラッシュ，ハングアップを未然に防ぐことができる．
+また，ソフトウェアの再起動は，クラッシュやハングアップからソフトウェアをリカバリするためにも使われる．
+\rr は，フォルトの根本的な原因を解析することなしにフォルトからリカバリすることができるうえ，
 アプリケーションの修正をせずに適用できるため，
 エンドユーザにとってのソフトウェアのエラーや不具合への唯一の対策となることがしばしばある．
-また，\rr は，クラッシュやハングアップからアプリケーションをリカバリするためにも使われる．
 その有用性から \rr の適用範囲を拡大するために，
 研究者たちは Java アプリケーション~\cite{CandeaEtAl-Microreboot}やインメモリデータベース~\cite{JumonjiEtAl-WoSAR17,JumonjiEtAl-IEICE2021}，
-オペレーティングシステム~\cite{YamakitaEtAl-PBR,DepoutovitchEtAl-otherworld,KouraiEtAl-cachemind,TeradaEtAl-Dwarf,BovenziEtAl-ISSRE13}，
+オペレーティングシステム(OS)~\cite{YamakitaEtAl-PBR,DepoutovitchEtAl-otherworld,KouraiEtAl-cachemind,TeradaEtAl-Dwarf,BovenziEtAl-ISSRE13}，
 ハイパーバイザ~\cite{KouraiEtAl-Roothammer,KouraiEtAl-TDSC,LeEtAl-VEE11}などの様々なソフトウェアレイヤに対して有効なソフトウェアメカニズムを提案している.
 
-\rr は，\emph{Unikernel} と呼ばれる新しいタイプのオペレーティングシステムへの適用にするという課題に直面している，
+\rr は，\emph{Unikernel} と呼ばれる新しいタイプの OS への適用するという課題に直面している．
 Unikernel ~\cite{MadhavapeddyEtAl-Unikernel,KivityEtAl-OSv,SartakovEtAl-ASPLOS21,KanteeEtAl-rumprun,KuenzerEtAl-Unikraft}は，
 OS の機能がライブラリのようにアプリケーションにリンクするライブラリ OS であり，
 特にクラウド環境において利点となるいくつかのメリットを提供する．
 第一に，Unikernel は，アプリケーションと同じ保護モードで動作するため，
-システムコールを実行時にモード切り替えが発生せず，
+システムコール実行時にモード切り替えが発生せず，
 システムコールオーバヘッドの問題が軽減される．
-第二に，
-すべての機能を内包する
-汎用的に使われるモノリシック OS カーネルとは異なり，
+第二に，すべての OS 機能を含む汎用的に使われるモノリシック OS カーネルとは異なり，
 Unikernel では，
 アプリケーションの実行に必要な OS コンポーネントのみをリンクするため，
-Unikernel にリンクされたアプリケーションのメモリフットプリントが小さい．
+メモリフットプリントが小さい．
 第三に，
 不必要な OS コンポーネントを排除することで，
 Unikernel にリンクされたアプリケーションのトラステッドコンピューティングベース(TCB)を小さく保ち，
 攻撃の標的となるものを減らすことができる．
 
 Unikernel の主要なタスクは，ハイパーバイザ上でリンクされたアプリケーションの実行を制御することであるため，
-できるだけ信頼性を高いものにしたほうが良く，Unikernel レイヤのみの \rr は有用である．
-例えば，Unikernel が経年劣化によって停止したときに，
+できるだけ信頼性を高くしたほうが良い．
+たとえば，Unikernel が経年劣化によって停止したときに，
 Unikernel にリンクされたアプリケーションは正常に動作しなくなる．
+実際に，Unikraft~\cite{KuenzerEtAl-Unikraft} や CubicleOS~\cite{SartakovEtAl-ASPLOS21}，
+FlexOS~\cite{LefeuvreEtAl-FlexOS} といった Unikernel レイヤの
+分離を強化して，その信頼性を高めるアプローチが提案されている．
 しかし，Unikernel レイヤのみの \rr を効率的に行うことは困難である．
-Unikernel レイヤとアプリケーションの結びつきが強いため，
-アプリケーションの再起動を伴うことになり，
-Unikernel に関係のないメモリの内容を消去し，再構築してしまう．
+Unikernel レイヤとアプリケーションがアドレス空間を共有するため，
+Unikernel レイヤの再起動にアプリケーションの再起動を伴うことになり，
+Unikernel に関係のないメモリの内容を消去し再構築してしまう．
+メモリフットプリントの大きいインメモリアプリケーションでは，
+メモリの内容の再構築に多大な時間を要する．
 実行中のアプリケーションの再起動を伴わない OS カーネルのみを若返らせるソフトウェアメカニズム~\cite{DepoutovitchEtAl-otherworld,TeradaEtAl-Dwarf}が提案されているものの，
 それらの設計はモノリシック OS カーネルが対象であり，
-アプリケーションの実行ごとに OS コンポーネントが異なる Unikernel には適さない．
-
-Unikernel は，限定的な機能のみしか実装しないため，
-汎用 OS ほど複雑ではなく，そのコードサイズも比較的小さいが，
-Unikernel がソフトウェアバグを含まないわけではない．
-実際に，現在進行中の Unikernel のプロジェクトにはいくつものバグが報告されており，
-その中には，メモリリークといった経年劣化に関連するバグも存在する~\cite{Memleak-Unikraft,Memleak-Mirage}．
-また，アプリケーションに必要な機能を提供するために，
-アプリケーションの要件に合わせて，
-サードパーティ製のライブラリを組み合わせた構成にカスタマイズすることもある．
-
+アプリケーションによってカーネルの構成が変化する Unikernel では，
+アプリケーションごとのメカニズムの再設計が必要になってしまう．
 
 本論文では，
+信頼性の高い Unikernel への一歩を踏み出すために，
 効率的に Unikernel レイヤのみの \rr を実現する \emph{\sysname} を紹介する．
-VampOS は，
-リンクされたアプリケーションの実行状態を維持したまま，
+\sysname はリンクされたアプリケーションの実行状態を維持したまま，
 Unikernel のコンポーネント単位での Reboot-based Recovery を行う．
-VampOS は，Unikernel のカスタマイズ性を利用する．
+\sysname は，Unikernel のカスタマイズ性を利用する．
 Unikernel のコンポーネントは互いに高度に独立し，
 コンポーネント間のインタフェースは明確に定義されている．
 \sysname は，対象のコンポーネントを再起動し，
@@ -68,21 +62,22 @@ Unikernel のコンポーネントは互いに高度に独立し，
 を再実行させることで，
 コンポーネントの実行状態をリフレッシュしたメモリの内容とともに復元する．
 
-Reboot-based Recovery の前段階であるソフトウェア若化を
-行う VampOS のプロトタイプ Unikraft 0.8.0 に実装し，
-VampOS の有効性を示す予備実験を行った．
-実験の結果は，その実行時のオーバヘッドは最大で 13.60 倍であるものの，
-VampOS にリンクされたリレーショナルデータベースである SQLite に
+ソフトウェア若化を行う最適化されていない \sysname のプロトタイプ Unikraft 0.8.0 に実装し，
+\sysname の有効性を示す実験を行った．
+実験の結果は，ランタイムオーバヘッドは最大で 13.60 倍であるものの，
+\sysname にリンクされたリレーショナルデータベースである SQLite に
 意図的に挿入したメモリリークのバグの影響を僅かなダウンタイムで緩和することを確認した．
 本研究は，Unikernel の効率的な \rr を実現するための最初の段階であり，
-プロトタイプは十分に最適化されていない．
-しかし，Unikernel にリンクされたアプリケーションの効率的な \rr のための次の方向性を明確に捉えることができた．
+プロトタイプは十分に最適化されておらず，エラー伝搬防止やリカバリのためのメカニズムは実装されていない．
+しかし，Unikernel レイヤのみの効率的な \rr のための次の方向性を明確に捉えることができた．
 
 本論文の構成は次のとおりである．
-第 2 章では本研究の背景について述べ，
-第 3 章では VampOS の概要を示す．
-第 4 章では，VampOS のプロトタイプを用いた予備実験とその結果について述べる．
-第 5 章では，本研究の現状と次の方向性について述べる．
+2 章で本研究の背景について述べ，
+3 章で \sysname の概要を示す．
+4 章で，\sysname の設計について述べ，
+5 章で \sysname のプロトタイプを用いた実験とその結果について述べる．
+6 章では本研究における議論を展開し，
+7 章で本研究のまとめについて述べる．
 
 % % rejuvenation
 % Software rejuvenation~\cite{HuangEtAl-rejuvenation,CotroneoEtAl-rejuvenation-survey,CotroneoEtAl-Surv14} is a simple but powerful method for improving the availability of computer systems. Software rejuvenation refreshes the running states of an application by restarting it. Periodically performing software rejuvenation reclaims stale or leaked resources as memory leaks and descriptor leaks, a.k.a. \emph{software aging}, resulting in preventing application crashes. Software rejuvenation allows us to recover from failures without analyzing their root causes. In addition, this method is applicable to ``as-is'' applications and thus often becomes the only remedy against software errors and failures for end users. To extend the applicability of software rejuvenation due to its usefulness, researchers have proposed effective software mechanisms for various software layers such as java applications~\cite{CandeaEtAl-Microreboot}, in-memory databases~\cite{JumonjiEtAl-WoSAR17,JumonjiEtAl-IEICE2021}, operating systems (OSes)~\cite{YamakitaEtAl-PBR,DepoutovitchEtAl-otherworld,KouraiEtAl-cachemind,TeradaEtAl-Dwarf,BovenziEtAl-ISSRE13}, and hypervisors~\cite{KouraiEtAl-Roothammer,KouraiEtAl-TDSC,LeEtAl-VEE11}.

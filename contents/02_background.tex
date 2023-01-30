@@ -23,32 +23,32 @@ OS の機能の一部のみを使用するためである．
 クラウドサービスの軽量化~\cite{GainEtAl-Spacer}
 を含む Unikernel の仕組みと適用範囲を研究している．
 
-\begin{figure}[t]
-    \begin{center}
-      \begin{tabular}{c}
-        \includegraphics[scale=0.3]{./img/monolithic.eps} \\
-        (a) Conventional Monolithic OS kernel       \vspace*{2mm} \\ 
-        \includegraphics[scale=0.3]{./img/unikernel.eps} \\
-        (b) Unikernel \\
-      \end{tabular}
-      \caption{OS カーネルアーキテクチャの違い}
-      \label{fig:kernels}
-    \end{center}
-  \end{figure}
+% \begin{figure}[t]
+%     \begin{center}
+%       \begin{tabular}{c}
+%         \includegraphics[scale=0.3]{./img/monolithic.eps} \\
+%         (a) Conventional Monolithic OS kernel       \vspace*{2mm} \\ 
+%         \includegraphics[scale=0.3]{./img/unikernel.eps} \\
+%         (b) Unikernel \\
+%       \end{tabular}
+%       \caption{OS カーネルアーキテクチャの違い}
+%       \label{fig:kernels}
+%     \end{center}
+%   \end{figure}
 
-図\ref{fig:kernels}は，従来のモノリシックカーネルと Unikernel の違いを示している．
-Linux のような従来の OS カーネルでは，ファイルシステムやネットワークスタックのようなサブシステムを，その必要性に関係なくすべて含んでおり，
-アプリケーションより高い特権レベルで動作する．
-アプリケーションは計算資源を要求するためにシステムコールを発行し，
-トラップすることによって，下層の OS カーネルに特権的な操作を行わせる．
-一方で，Unikernel は対象のアプリケーションが動作するのに必要なコンポーネントのみをアプリケーションに直接リンクし，
-同じアドレス空間で同じ特権モードで動作する．
-アプリケーションは，
-動作に必要な OS コンポーネントのみを選択して，リンクすることができる．
-これらの特徴は，従来の OS カーネルと比較して，
-高速なシステムコール発行やブート時間の短縮，
-メモリフットプリントの縮小，OS カーネルレイヤのコードサイズの縮小を含む
-いくつかの利点を提供する．
+% 図\ref{fig:kernels}は，従来のモノリシックカーネルと Unikernel の違いを示している．
+% Linux のような従来の OS カーネルでは，ファイルシステムやネットワークスタックのようなサブシステムを，その必要性に関係なくすべて含んでおり，
+% アプリケーションより高い特権レベルで動作する．
+% アプリケーションは計算資源を要求するためにシステムコールを発行し，
+% トラップすることによって，下層の OS カーネルに特権的な操作を行わせる．
+% 一方で，Unikernel は対象のアプリケーションが動作するのに必要なコンポーネントのみをアプリケーションに直接リンクし，
+% 同じアドレス空間で同じ特権モードで動作する．
+% アプリケーションは，
+% 動作に必要な OS コンポーネントのみを選択して，リンクすることができる．
+% これらの特徴は，従来の OS カーネルと比較して，
+% 高速なシステムコール発行やブート時間の短縮，
+% メモリフットプリントの縮小，OS カーネルレイヤのコードサイズの縮小を含む
+% いくつかの利点を提供する．
 
 本論文は，
 \emph{どのように Unikernel レイヤのみの効率的な \rr を実現するのか?}
@@ -68,7 +68,7 @@ Unikernel でも同様に，いくつものバグが報告されている\cite{I
 アプリケーションの要件に合わせて，
 サードパーティ製のライブラリを組み合わせた構成にカスタマイズすることもある．
 そのため，Unikernel を定期的に再起動し，
-若返りしたメモリの内容の使用させることは，
+リフレッシュしたメモリの内容の使用させることは，
 クラウドサービスを安定して提供するのに有効である．
 
 しかし，効率的な Unikernel の \rr は容易ではない．
@@ -84,7 +84,25 @@ Facebook のサーバを一度に 2 \% だけを再起動すると，
 再起動時間は約 12 時間まで延長され，
 ユーザはクエリの結果の一部しか見ることができないことが報告されている~\cite{GoelEtAl-SIGMOD14}．
 
+\subsection{\rr}
+
+\subsection{フォルトモデル}
+
 \subsection{過去のアプローチ}
+
+いくつかのアプローチは Unikernel の信頼性の向上を目的としている．
+Unikraft~\cite{KuenzerEtAl-Unikraft}は，
+Unikernel のモジュラリティを高め，
+TCB をできるだけ小さくすることによってカスタマイズ性と信頼性を向上させている．
+CubicleOS~\cite{SartakovEtAl-ASPLOS21}と FlexOS~\cite{LefeuvreEtAl-FlexOS}は，
+フォルトしたコンポーネントから他のコンポーネントへのエラー伝搬を防ぐために
+Unikernel のコンポーネント同士を強く分離するものである．
+これらのアプローチは，
+アプリケーションのコンポーネントやサードパーティ製のライブラリなどからの
+悪意のある攻撃から Unikernel の機密性と完全性を保護することを目的とするものである．
+これらのアプローチでは，Unikernel が経年劣化に関連したバグに悩まされることがないことを保証できないのに対し，
+私たちのアプローチでは Unikernel を \rr することでその悪影響を軽減することができる．
+
 
 対象のソフトウェアを効率的に再起動するための
 ソフトウェアメカニズムはこれまでにも模索されている．
@@ -124,7 +142,7 @@ Microreboot~\cite{CandeaEtAl-Microreboot}は，
 Microreboot を可能にするために，
 対象のアプリケーションは
 再起動の単位となる独立した小さいソフトウェアコンポーネントに分割される．
-小さいコンポーネントの再起動がフォルトからリカバリできない場合には，
+小さいコンポーネントの再起動がフォルトからリカバリ できない場合には，
 より大きいコンポーネントが再起動される．
 このアプローチの暗黙の仮定として，
 Microreboot される各コンポーネントは状態を持たないので，
@@ -134,7 +152,7 @@ Unikernel のコンポーネントは状態を持つことが多く，
 ファイルシステムやネットワークのような状態を持つコンポーネントの再起動に渡って，
 アプリケーションが継続して動作することは難しい．
 
-Phase-baseds~\cite{YamakitaEtAl-PBR}や ShadowReboot~\cite{YamadaEtAl-ShadowR}，CacheMind~\cite{KouraiEtAl-cachemind}を含む
+Phase-based Reboot~\cite{YamakitaEtAl-PBR}や ShadowReboot~\cite{YamadaEtAl-ShadowR}，CacheMind~\cite{KouraiEtAl-cachemind}を含む
 効率的な OS の再起動に対するアプローチは，
 OS カーネルの再起動によって引き起こされるダウンタイムとパフォーマンスの低下を軽減する．
 通常の OS の再起動のように，これらのアプローチはすべての動作中のアプリケーションの再起動を伴い，
@@ -142,21 +160,6 @@ OS カーネルの再起動によって引き起こされるダウンタイム�
 ハイパーバイザのソフトウェア若化をサポートするアプローチでは，
 ハイパーバイザの再起動渡って，仮想マシンの動作状態を維持する．
 これらのアプローチは，私たちのアプローチと補完関係にある．
-
-いくつかのアプローチは Unikernel の信頼性の向上を目的としている．
-Unikraft~\cite{KuenzerEtAl-Unikraft}は，
-Unikernel のモジュラリティを高め，
-TCB をできるだけ小さくすることによってカスタマイズ性と信頼性を向上させている．
-CubicleOS~\cite{SartakovEtAl-ASPLOS21}と FlexOS~\cite{LefeuvreEtAl-FlexOS}は，
-フォルトしたコンポーネントから他のコンポーネントへのエラー伝搬を防ぐために
-Unikernel のコンポーネント同士を強く分離するものである．
-これらのアプローチは，
-アプリケーションのコンポーネントやサードパーティ製のライブラリなどからの
-悪意のある攻撃から Unikernel の機密性と完全性を保護することを目的とするものである．
-これらのアプローチでは，Unikernel が経年劣化に関連したバグに悩まされることがないことを保証できないのに対し，
-私たちのアプローチでは Unikernel を \rr することでその悪影響を軽減することができる．
-また，私たちの研究は Unikernel の \rr をテーマとしており，
-Unikernel への攻撃を想定するものではない．
 
 % A. Unikernels
 % The unikernel is linked to the target applications and
